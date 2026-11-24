@@ -5,6 +5,7 @@ import ToolMenu from './ToolMenu'
 import { HL_PALETTE } from '../palettes'
 import { uid } from '../ink'
 import { saveMedia } from '../items'
+import { folderTree } from '../folders'
 import type { Content, Folder, Item, Note, Paper, PenType, Stroke, TextItem, Tool } from '../types'
 
 /** `boxes` = the item list before and after, for steps that change images or text. */
@@ -388,9 +389,9 @@ export default function Editor({ note, initial, folders, onBack, onUpdate, onCon
           onChange={(e) => onUpdate({ folderId: e.target.value || null })}
         >
           <option value="">No folder</option>
-          {folders.map((f) => (
+          {folderTree(folders).map(({ folder: f, depth }) => (
             <option key={f.id} value={f.id}>
-              {f.name}
+              {'\u2003'.repeat(depth) + f.name}
             </option>
           ))}
         </select>

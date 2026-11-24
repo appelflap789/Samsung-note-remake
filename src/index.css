@@ -66,7 +66,7 @@ input, select { font: inherit; color: inherit; }
 .side-count { color: var(--muted); font-size: 13px; }
 .side-divider { height: 1px; background: var(--border); margin: 8px 6px; }
 .folder-row { position: relative; }
-.folder-row .side-item { padding-left: 30px; }
+.folder-row .side-item { padding-left: calc(30px + var(--depth, 0) * 16px); }
 .sidebar.collapsed .folder-row .side-item { padding-left: 12px; }
 .folder-del { position: absolute; right: 36px; top: 50%; transform: translateY(-50%); opacity: 0; }
 .folder-row:hover .folder-del { opacity: 1; }

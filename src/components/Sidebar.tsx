@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { CloudCheck, CloudExclamationPoint, CloudOff, FileText, Folder as FolderIcon, FolderOpen, FolderPlus, HardDrive, Menu, CloudSync, Star, Trash2, X } from 'lucide-react'
 import type { DB, View } from '../types'
 import type { SyncStatus } from '../store'
+import { folderTree, noteCount } from '../folders'
 
 const SYNC: Record<SyncStatus, { Icon: typeof CloudCheck; label: string }> = {
   local: { Icon: HardDrive, label: 'Saved on this device' },
@@ -20,7 +21,8 @@ interface Props {
   collapsed: boolean
   onToggle: () => void
   onView: (v: View) => void
-  onCreateFolder: (name: string) => void
+  /** Creates the folder inside the open folder, if any. */
+  onCreateFolder: (name: string, parentId: string | null) => void
   onDeleteFolder: (id: string) => void
 }
 
@@ -39,7 +41,7 @@ export default function Sidebar({ db, view, sync, left, collapsed, onToggle, onV
   )
 
   const submit = () => {
-    if (name.trim()) onCreateFolder(name.trim())
+    if (name.trim()) onCreateFolder(name.trim(), view.kind === 'folder' ? view.id : null)
     setName('')
     setAdding(false)
   }
@@ -71,26 +73,21 @@ export default function Sidebar({ db, view, sync, left, collapsed, onToggle, onV
         <input
           autoFocus
           className="folder-input"
-          placeholder="Folder name"
+          placeholder={view.kind === 'folder' ? 'Subfolder name' : 'Folder name'}
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => (e.key === 'Enter' ? submit() : e.key === 'Escape' && setAdding(false))}
           onBlur={submit}
         />
       )}
-      {db.folders.map((f) => (
-        <div key={f.id} className="folder-row">
-          {item(
-            { kind: 'folder', id: f.id },
-            <FolderIcon size={18} />,
-            f.name,
-            live.filter((n) => n.folderId === f.id).length,
-          )}
+      {folderTree(db.folders).map(({ folder: f, depth }) => (
+        <div key={f.id} className="folder-row" style={{ '--depth': depth } as React.CSSProperties}>
+          {item({ kind: 'folder', id: f.id }, <FolderIcon size={18} />, f.name, noteCount(db.folders, db.notes, f.id))}
           {!collapsed && (
             <button
               className="icon-btn small folder-del"
               title="Delete folder (notes are kept)"
-              onClick={() => confirm(`Delete folder "${f.name}"? Notes stay in All notes.`) && onDeleteFolder(f.id)}
+              onClick={() => confirm(`Delete folder "${f.name}"? Its notes and subfolders move up one level.`) && onDeleteFolder(f.id)}
             >
               <X size={14} />
             </button>

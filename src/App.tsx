@@ -6,6 +6,7 @@ import Editor from './components/Editor'
 import { useNotesDB } from './store'
 import { uid } from './ink'
 import { importSdocx } from './sdocx'
+import { childFolders, folderPath, noteCount } from './folders'
 import { saveMedia } from './items'
 import type { Content, View } from './types'
 
@@ -76,7 +77,7 @@ export default function App() {
             trashed: false,
             createdAt: file.lastModified || now,
             updatedAt: now,
-            paper: 'plain',
+            paper: 'lined',
           },
           { strokes: r.strokes, items: r.items },
         )
@@ -112,8 +113,9 @@ export default function App() {
           ? 'Trash'
           : view.kind === 'folders'
             ? 'Folders'
-          : (db.folders.find((f) => f.id === view.id)?.name ?? 'Folder')
+          : folderPath(db.folders, view.id)
 
+  const subfolders = childFolders(db.folders, view.kind === 'folder' ? view.id : null)
   const sortLabel = { updated: 'Date modified', created: 'Date created', title: 'Title' }[sort]
   const nextSort: Record<Sort, Sort> = { updated: 'created', created: 'title', title: 'updated' }
 
@@ -141,15 +143,15 @@ export default function App() {
             <Search size={16} />
           </label>
         </div>
-        {view.kind === 'folders' && (
+        {(view.kind === 'folders' || (view.kind === 'folder' && subfolders.length > 0)) && (
           <>
             <div className="folders-summary">
-              {db.folders.length} folders, {notes.length} notes
+              {subfolders.length} folders, {notes.length} notes
             </div>
             <div className="folder-tiles">
-              {db.folders.map((f) => (
+              {subfolders.map((f) => (
                 <button key={f.id} className="folder-tile" onClick={() => setView({ kind: 'folder', id: f.id })}>
-                  <span className="folder-tile-count">{db.notes.filter((n) => !n.trashed && n.folderId === f.id).length}</span>
+                  <span className="folder-tile-count">{noteCount(db.folders, db.notes, f.id)}</span>
                   <span className="folder-tile-name">{f.name}</span>
                 </button>
               ))}
@@ -182,7 +184,7 @@ export default function App() {
           </button>
         </div>
 
-        {notes.length === 0 && view.kind === 'folders' ? null : notes.length === 0 ? (
+        {notes.length === 0 && (view.kind === 'folders' || subfolders.length > 0) ? null : notes.length === 0 ? (
           <div className="empty">{view.kind === 'trash' ? 'Trash is empty' : 'No notes yet. Tap the pen button to start writing.'}</div>
         ) : (
           <div className="grid">

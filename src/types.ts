@@ -85,6 +85,8 @@ export interface Content {
 export interface Folder {
   id: string
   name: string
+  /** Containing folder; missing/null for top-level folders. */
+  parentId?: string | null
 }
 
 export interface DB {

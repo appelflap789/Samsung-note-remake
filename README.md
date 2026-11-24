@@ -24,6 +24,11 @@ Open http://localhost:4173 in Edge → **⋯ → Apps → Install this site as a
 - **S Pen side button**: on Android a click arms the eraser for the next stroke (pressed mid-stroke, the rest of that stroke erases); on Windows, hold it while writing. Debug pen input with `?pendebug`.
 - Hand toggle on: fingers scroll, pen draws (palm-friendly). Off: fingers draw too.
 - Ctrl+Z / Ctrl+Y undo/redo. Mouse wheel scrolls; right-drag with a mouse erases.
+- Pinch with two fingers (or Ctrl+wheel) to zoom; drag sideways when zoomed. A finger swipe keeps scrolling with momentum.
+- New notes use lined paper.
+
+## Folders
+Folders can be nested: open a folder and press "+" in the sidebar to create a subfolder. Deleting a folder moves its notes and subfolders up one level. Move a note via the folder dropdown in the editor.
 
 ## Import from Samsung Notes
 In Samsung Notes, share a note as a **Samsung Notes file** (`.sdocx`), then use **Import Samsung Notes** in the note list (multiple files allowed). Handwriting comes in as editable strokes with its colour, thickness and pressure; each Samsung page starts on a new page. Images, typed text, text boxes, link cards and shapes come in as objects: tap one with the lasso to select it, drag to move, use the corner handle to resize, and tap a selected text again to edit it. The **T** and image buttons add new ones. Text styling (bold etc.) and PDFs are not imported. To add these objects to notes imported with an older version, run `scripts/reimport.ts` (instructions in the file) on the server data with the original `.sdocx` files. Format details from [bxff/samsung-notes-format](https://github.com/bxff/samsung-notes-format) and the [twangodev/sdocx](https://github.com/twangodev/sdocx) format notes.

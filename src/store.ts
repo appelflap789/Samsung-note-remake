@@ -242,7 +242,7 @@ export function useNotesDB() {
 
   const createNote = useCallback((folderId: string | null): string => {
     const now = Date.now()
-    const note: Note = { id: uid(), title: '', folderId, favorite: false, trashed: false, createdAt: now, updatedAt: now, paper: 'plain', sv: uid() }
+    const note: Note = { id: uid(), title: '', folderId, favorite: false, trashed: false, createdAt: now, updatedAt: now, paper: 'lined', sv: uid() }
     live.set(note.id, { sv: note.sv, strokes: [] })
     setDb((d) => d && { ...d, notes: [note, ...d.notes] })
     return note.id
@@ -327,19 +327,21 @@ export function useNotesDB() {
     setDb((d) => d && { ...d, notes: d.notes.filter((n) => !n.trashed) })
   }, [])
 
-  const createFolder = useCallback((name: string) => {
-    const f: Folder = { id: uid(), name }
+  const createFolder = useCallback((name: string, parentId: string | null = null) => {
+    const f: Folder = { id: uid(), name, parentId }
     setDb((d) => d && { ...d, folders: [...d.folders, f] })
   }, [])
 
+  // Its notes and subfolders move up to the parent folder.
   const deleteFolder = useCallback((id: string) => {
-    setDb(
-      (d) =>
-        d && {
-          folders: d.folders.filter((f) => f.id !== id),
-          notes: d.notes.map((n) => (n.folderId === id ? { ...n, folderId: null } : n)),
-        },
-    )
+    setDb((d) => {
+      if (!d) return d
+      const parent = d.folders.find((f) => f.id === id)?.parentId ?? null
+      return {
+        folders: d.folders.filter((f) => f.id !== id).map((f) => (f.parentId === id ? { ...f, parentId: parent } : f)),
+        notes: d.notes.map((n) => (n.folderId === id ? { ...n, folderId: parent } : n)),
+      }
+    })
   }, [])
 
   return { db, status, left, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }

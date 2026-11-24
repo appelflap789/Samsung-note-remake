@@ -42,7 +42,7 @@ interface Props {
 const TOP = 24 // screen px gap above the first page
 const HOLD_MS = 600 // keep the pen still this long to snap the stroke into a shape
 
-type Mode = 'none' | 'draw' | 'erase' | 'pan' | 'lasso' | 'move' | 'resize'
+type Mode = 'none' | 'draw' | 'erase' | 'pan' | 'pinch' | 'lasso' | 'move' | 'resize'
 type Box = [number, number, number, number]
 
 function inPolygon(x: number, y: number, poly: number[][]) {
@@ -89,6 +89,8 @@ export default function InkCanvas(props: Props) {
     w: 0,
     h: 0,
     zoom: 1,
+    fit: 1, // zoom at which the page fills the width
+    scale: 1, // user zoom relative to `fit`
     offX: 0,
     scrollY: 0,
     rect: null as DOMRect | null,
@@ -108,7 +110,11 @@ export default function InkCanvas(props: Props) {
     tapItem: null as string | null, // pressed an already selected text item: a tap (no drag) edits it
     resize: null as { id: string; w: number; h: number } | null,
     lastMenu: -1e9,
-    panLastY: 0,
+    panLast: [0, 0] as [number, number],
+    panTrail: [] as [number, number, number][], // recent [time, x, y] for the fling velocity
+    fling: 0,
+    touches: new Map<number, [number, number]>(),
+    pinch: null as { d0: number; z0: number; px: number; py: number } | null,
     contentBottom: 0,
   }).current
 
@@ -119,7 +125,11 @@ export default function InkCanvas(props: Props) {
 
     const pages = () => Math.max(1, Math.floor(s.contentBottom / PAGE_H) + 2)
     const maxScroll = () => Math.max(0, TOP * 2 + pages() * PAGE_H * s.zoom - s.h)
-    const clampScroll = () => (s.scrollY = Math.max(0, Math.min(maxScroll(), s.scrollY)))
+    const clampScroll = () => {
+      s.scrollY = Math.max(0, Math.min(maxScroll(), s.scrollY))
+      const pw = PAGE_W * s.zoom
+      s.offX = pw <= s.w - 48 ? (s.w - pw) / 2 : Math.max(s.w - pw - 24, Math.min(24, s.offX))
+    }
 
     const pageTransform = (ctx: CanvasRenderingContext2D) =>
       ctx.setTransform(s.dpr * s.zoom, 0, 0, s.dpr * s.zoom, s.dpr * s.offX, s.dpr * (TOP - s.scrollY))
@@ -257,8 +267,8 @@ export default function InkCanvas(props: Props) {
       s.bg = getComputedStyle(wrap).getPropertyValue('--canvas-bg').trim() || s.bg
       s.w = r.width
       s.h = r.height
-      s.zoom = Math.min(1.6, Math.max(0.3, (r.width - 48) / PAGE_W))
-      s.offX = (r.width - PAGE_W * s.zoom) / 2
+      s.fit = Math.min(1.6, Math.max(0.3, (r.width - 48) / PAGE_W))
+      s.zoom = s.fit * s.scale
       for (const c of [canvas, s.committed]) {
         c.width = Math.round(r.width * s.dpr)
         c.height = Math.round(r.height * s.dpr)
@@ -278,15 +288,57 @@ export default function InkCanvas(props: Props) {
       return [Math.round(x * 100) / 100, Math.round(y * 100) / 100, Math.max(0.05, e.pressure || 0.5)]
     }
 
-    const scrollBy = (dy: number) => {
-      const before = s.scrollY
-      s.scrollY += dy
+    const view = () => {
       clampScroll()
-      if (s.scrollY !== before) {
-        renderCommitted()
-        present()
-        placeEditor()
+      renderCommitted()
+      present()
+      placeEditor()
+    }
+
+    /** Moves the content by (dx, dy) screen px; false when it's already at the edge. */
+    const panBy = (dx: number, dy: number) => {
+      const before = [s.offX, s.scrollY]
+      s.offX += dx
+      s.scrollY -= dy
+      clampScroll()
+      if (s.offX === before[0] && s.scrollY === before[1]) return false
+      renderCommitted()
+      present()
+      placeEditor()
+      return true
+    }
+
+    /** Zoom so that page point (px, py) sits at screen point (mx, my) relative to the canvas. */
+    const zoomTo = (zoom: number, px: number, py: number, mx: number, my: number) => {
+      s.zoom = Math.min(s.fit * 4, Math.max(s.fit * 0.5, zoom))
+      s.scale = s.zoom / s.fit
+      s.offX = mx - px * s.zoom
+      s.scrollY = TOP + py * s.zoom - my
+      view()
+    }
+
+    const stopFling = () => cancelAnimationFrame(s.fling)
+    // Keep scrolling after a swipe, slowing down like native lists do.
+    const startFling = () => {
+      const t = s.panTrail
+      const now = performance.now()
+      const first = t.find(([ts]) => now - ts < 100)
+      const last = t[t.length - 1]
+      s.panTrail = []
+      if (!first || !last || first === last || now - last[0] > 60) return
+      let vx = (last[1] - first[1]) / (last[0] - first[0])
+      let vy = (last[2] - first[2]) / (last[0] - first[0])
+      let prev = now
+      const step = (ts: number) => {
+        const dt = Math.min(32, ts - prev)
+        prev = ts
+        const decay = Math.exp(-dt / 325)
+        vx *= decay
+        vy *= decay
+        if (Math.hypot(vx, vy) < 0.02 || !panBy(vx * dt, vy * dt)) return
+        s.fling = requestAnimationFrame(step)
       }
+      s.fling = requestAnimationFrame(step)
     }
 
     const eraseAt = (x: number, y: number) => {
@@ -422,6 +474,23 @@ export default function InkCanvas(props: Props) {
     const p0 = () => propsRef.current
     const onDown = (e: PointerEvent) => {
       const p = propsRef.current
+      stopFling()
+      if (e.pointerType === 'touch') {
+        s.touches.set(e.pointerId, [e.clientX, e.clientY])
+        // A second finger turns panning (or a just-started finger stroke) into pinch-zoom.
+        if (s.touches.size === 2 && (s.mode === 'pan' || (s.mode === 'draw' && s.live && !s.live.pressure))) {
+          finish(true)
+          e.preventDefault()
+          canvas.setPointerCapture(e.pointerId)
+          s.rect = canvas.getBoundingClientRect()
+          const [[ax, ay], [bx, by]] = [...s.touches.values()]
+          const mx = (ax + bx) / 2 - s.rect.left
+          const my = (ay + by) / 2 - s.rect.top
+          s.pinch = { d0: Math.hypot(ax - bx, ay - by) || 1, z0: s.zoom, px: (mx - s.offX) / s.zoom, py: (my - TOP + s.scrollY) / s.zoom }
+          s.mode = 'pinch'
+          return
+        }
+      }
       if (s.mode === 'pan' && e.pointerType === 'pen') finish(true) // pen wins over palm/finger
       if (s.mode !== 'none') return
       if (p.editing && e.pointerType !== 'touch') {
@@ -438,7 +507,8 @@ export default function InkCanvas(props: Props) {
 
       if (e.pointerType === 'touch' && p.penOnly) {
         s.mode = 'pan'
-        s.panLastY = e.clientY
+        s.panLast = [e.clientX, e.clientY]
+        s.panTrail = [[e.timeStamp, e.clientX, e.clientY]]
         return
       }
       if (p.tool === 'eraser' || penEraser(e) || (e.pointerType === 'mouse' && e.button === 2)) {
@@ -503,13 +573,22 @@ export default function InkCanvas(props: Props) {
     }
 
     const onMove = (e: PointerEvent) => {
+      if (s.touches.has(e.pointerId)) s.touches.set(e.pointerId, [e.clientX, e.clientY])
+      if (s.mode === 'pinch' && s.pinch && s.touches.size >= 2) {
+        const [[ax, ay], [bx, by]] = [...s.touches.values()]
+        const { d0, z0, px, py } = s.pinch
+        zoomTo((z0 * Math.hypot(ax - bx, ay - by)) / d0, px, py, (ax + bx) / 2 - s.rect!.left, (ay + by) / 2 - s.rect!.top)
+        return
+      }
       if (e.pointerId !== s.pointerId || s.mode === 'none') return
       const evs = e.getCoalescedEvents?.() ?? []
       const samples = evs.length ? evs : [e]
       if (s.mode === 'pan') {
-        const y = samples[samples.length - 1].clientY
-        scrollBy(s.panLastY - y)
-        s.panLastY = y
+        const { clientX: x, clientY: y } = samples[samples.length - 1]
+        panBy(x - s.panLast[0], y - s.panLast[1])
+        s.panLast = [x, y]
+        s.panTrail.push([e.timeStamp, x, y])
+        if (s.panTrail.length > 20) s.panTrail.shift()
         return
       }
       if (s.mode === 'erase') {
@@ -569,15 +648,43 @@ export default function InkCanvas(props: Props) {
       present()
     }
 
+    const liftTouch = (e: PointerEvent) => {
+      if (!s.touches.delete(e.pointerId) || s.mode !== 'pinch') return false
+      // One finger left: keep panning with it.
+      s.pinch = null
+      const rest = [...s.touches.entries()][0]
+      if (rest) {
+        s.mode = 'pan'
+        s.pointerId = rest[0]
+        s.panLast = rest[1]
+        s.panTrail = []
+      } else {
+        s.mode = 'none'
+        s.pointerId = -1
+      }
+      return true
+    }
     const onUp = (e: PointerEvent) => {
-      if (e.pointerId === s.pointerId) finish(false)
+      if (liftTouch(e)) return
+      if (e.pointerId !== s.pointerId) return
+      const fling = s.mode === 'pan'
+      finish(false)
+      if (fling) startFling()
     }
     const onCancel = (e: PointerEvent) => {
+      if (liftTouch(e)) return
       if (e.pointerId === s.pointerId) finish(true)
     }
     const onWheel = (e: WheelEvent) => {
       e.preventDefault()
-      scrollBy(e.deltaY)
+      stopFling()
+      if (e.ctrlKey) {
+        // Trackpad pinch / Ctrl+wheel zooms around the cursor.
+        const r = canvas.getBoundingClientRect()
+        const mx = e.clientX - r.left
+        const my = e.clientY - r.top
+        zoomTo(s.zoom * Math.exp(-e.deltaY / 200), (mx - s.offX) / s.zoom, (my - TOP + s.scrollY) / s.zoom, mx, my)
+      } else panBy(-e.deltaX, -e.deltaY)
     }
     const noMenu = (e: Event) => e.preventDefault()
 
@@ -630,6 +737,7 @@ export default function InkCanvas(props: Props) {
 
     return () => {
       clearTimeout(s.holdTimer)
+      stopFling()
       ro.disconnect()
       dark.removeEventListener('change', layout)
       canvas.removeEventListener('pointerdown', onDown)
