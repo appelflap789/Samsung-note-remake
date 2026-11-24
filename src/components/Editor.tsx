@@ -111,6 +111,27 @@ export default function Editor({ note, folders, onBack, onUpdate }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [doUndo, doRedo])
 
+  // Android Chrome doesn't report the S Pen side button in pointer events; a button click arrives as a
+  // `contextmenu` with button -1. Use it to toggle the eraser (mouse right-click has button 2 and is ignored).
+  const lastDrawTool = useRef<Tool>('pen')
+  useEffect(() => {
+    let lastToggle = 0
+    const onMenu = (e: MouseEvent) => {
+      const pen = (e as PointerEvent).pointerType === 'pen' || e.button === -1
+      if (!pen || e.button === 2) return
+      e.preventDefault()
+      if (e.timeStamp - lastToggle < 300) return
+      lastToggle = e.timeStamp
+      setTool((t) => {
+        if (t === 'eraser') return lastDrawTool.current
+        lastDrawTool.current = t
+        return 'eraser'
+      })
+    }
+    window.addEventListener('contextmenu', onMenu)
+    return () => window.removeEventListener('contextmenu', onMenu)
+  }, [])
+
   const cur = tool === 'highlighter' ? hl : pen
   const setCur = tool === 'highlighter' ? setHl : setPen
   const colors = tool === 'highlighter' ? HL_COLORS : PEN_COLORS
@@ -174,7 +195,7 @@ export default function Editor({ note, folders, onBack, onUpdate }: Props) {
           <button
             className={`tool ${tool === 'eraser' ? 'on' : ''}`}
             onClick={() => setTool('eraser')}
-            title="Eraser (or hold the S Pen side button)"
+            title="Eraser (or press the S Pen side button)"
           >
             <Eraser size={20} />
           </button>

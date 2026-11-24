@@ -18,7 +18,7 @@ Open http://localhost:4173 in Edge → **⋯ → Apps → Install this site as a
 
 ## Pen
 - Pressure-sensitive strokes ([perfect-freehand](https://github.com/steveruizok/perfect-freehand)).
-- Hold the **S Pen side button** to erase (stroke eraser), release to keep writing.
+- Click the **S Pen side button** to toggle the eraser (Android); on Windows, hold it while writing. Debug pen input with `?pendebug`.
 - Hand toggle on: fingers scroll, pen draws (palm-friendly). Off: fingers draw too.
 - Ctrl+Z / Ctrl+Y undo/redo. Mouse wheel scrolls; right-drag with a mouse erases.
 

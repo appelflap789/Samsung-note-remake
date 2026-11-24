@@ -19,7 +19,7 @@ export default function PenDebug() {
     }
     const onOther = (e: Event) => {
       if (e instanceof KeyboardEvent) add(`${e.type} key=${e.key} code=${e.code}`)
-      else if (e instanceof MouseEvent) add(`${e.type} button=${e.button} buttons=${e.buttons}`)
+      else if (e instanceof MouseEvent) add(`${e.type} ${(e as PointerEvent).pointerType ?? ''} button=${e.button} buttons=${e.buttons}`)
       else add(e.type)
     }
 
