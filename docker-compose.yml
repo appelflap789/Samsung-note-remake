@@ -1,0 +1,10 @@
+services:
+  notes:
+    build: .
+    container_name: samsung-notes
+    restart: unless-stopped
+    # Only reachable from the server itself; Tailscale Serve exposes it over HTTPS to your tailnet.
+    ports:
+      - 127.0.0.1:8787:8080
+    volumes:
+      - ./data:/data

@@ -28,6 +28,13 @@ Open http://localhost:4173 in Edge → **⋯ → Apps → Install this site as a
 ## Import from Samsung Notes
 In Samsung Notes, share a note as a **Samsung Notes file** (`.sdocx`), then use **Import Samsung Notes** in the note list (multiple files allowed). Handwriting comes in as editable strokes with its colour, thickness and pressure; each Samsung page starts on a new page. Typed text, images and PDFs are not imported. Format details from [bxff/samsung-notes-format](https://github.com/bxff/samsung-notes-format) and the [twangodev/sdocx](https://github.com/twangodev/sdocx) format notes.
 
+## Home server (sync)
+`server.mjs` serves the app and stores notes as JSON files (`data/notes/*.json`, `data/folders.json`). With it, every device syncs through the server; each device keeps an offline copy and uploads changes when it's back online (last change wins). Without it (GitHub Pages, `npm run dev`) notes stay on the device. The sidebar shows the sync status.
+
+- Deploy the current working copy: `./deploy.sh` (from PowerShell: `wsl ./deploy.sh`). It copies the code to `~/samsung-notes` on the server and rebuilds the Docker container; `~/samsung-notes/data` is never touched.
+- The container listens on `127.0.0.1:8787` only; `tailscale serve --bg --https=443 http://127.0.0.1:8787` makes it available at `https://<server>.<tailnet>.ts.net` on your tailnet.
+- Back up by copying `~/samsung-notes/data`.
+
 ## Why it feels smooth
 - `desynchronized` canvas → front-buffer rendering, skips the compositor queue.
 - `pointerrawupdate` + `getCoalescedEvents()` → every digitizer sample, not one per frame.

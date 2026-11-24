@@ -1,10 +1,20 @@
 import { useState } from 'react'
-import { FileText, Folder as FolderIcon, FolderOpen, FolderPlus, Menu, Star, Trash2, X } from 'lucide-react'
+import { CloudCheck, CloudExclamationPoint, CloudOff, FileText, Folder as FolderIcon, FolderOpen, FolderPlus, HardDrive, Menu, CloudSync, Star, Trash2, X } from 'lucide-react'
 import type { DB, View } from '../types'
+import type { SyncStatus } from '../store'
+
+const SYNC: Record<SyncStatus, { Icon: typeof CloudCheck; label: string }> = {
+  local: { Icon: HardDrive, label: 'Saved on this device' },
+  syncing: { Icon: CloudSync, label: 'Syncing…' },
+  synced: { Icon: CloudCheck, label: 'Synced with home server' },
+  offline: { Icon: CloudOff, label: 'Offline – changes kept on this device' },
+  error: { Icon: CloudExclamationPoint, label: 'Sync error – changes kept on this device' },
+}
 
 interface Props {
   db: DB
   view: View
+  sync: SyncStatus
   collapsed: boolean
   onToggle: () => void
   onView: (v: View) => void
@@ -12,7 +22,7 @@ interface Props {
   onDeleteFolder: (id: string) => void
 }
 
-export default function Sidebar({ db, view, collapsed, onToggle, onView, onCreateFolder, onDeleteFolder }: Props) {
+export default function Sidebar({ db, view, sync, collapsed, onToggle, onView, onCreateFolder, onDeleteFolder }: Props) {
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const live = db.notes.filter((n) => !n.trashed)
@@ -85,6 +95,13 @@ export default function Sidebar({ db, view, collapsed, onToggle, onView, onCreat
           )}
         </div>
       ))}
+      <div className={`sync-status ${sync}`} title={SYNC[sync].label}>
+        {(() => {
+          const { Icon } = SYNC[sync]
+          return <Icon size={14} />
+        })()}
+        {!collapsed && <span>{SYNC[sync].label}</span>}
+      </div>
     </aside>
   )
 }

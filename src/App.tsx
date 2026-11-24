@@ -15,7 +15,7 @@ const narrow = matchMedia('(max-width: 900px)')
 const fmt = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
 
 export default function App() {
-  const { db, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
+  const { db, status, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
@@ -107,6 +107,7 @@ export default function App() {
       <Sidebar
         db={db}
         view={view}
+        sync={status}
         collapsed={collapsed}
         onToggle={() => setCollapsed((c) => !c)}
         onView={setView}
