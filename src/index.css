@@ -142,3 +142,17 @@ input[type=range] { width: 110px; accent-color: var(--accent); }
   .search { width: 160px; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 20px 14px; }
 }
+
+.pen-debug {
+  position: fixed;
+  left: 8px;
+  bottom: 8px;
+  z-index: 1000;
+  max-width: min(560px, calc(100vw - 16px));
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font: 12px/1.4 ui-monospace, monospace;
+  pointer-events: none;
+}
