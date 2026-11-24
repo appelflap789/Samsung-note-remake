@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ArrowDownUp, FileInput, RotateCcw, Search, SquarePen, Star, Trash2 } from 'lucide-react'
+import { Activity, useEffect, useMemo, useRef, useState } from 'react'
+import { ArrowDownUp, ArrowLeft, FileInput, RotateCcw, Search, SquarePen, Star, Trash2 } from 'lucide-react'
 import Sidebar from './components/Sidebar'
 import Thumbnail from './components/Thumbnail'
 import Editor from './components/Editor'
@@ -20,6 +20,8 @@ export default function App() {
   const { db, status, left, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
   const [opened, setOpened] = useState<{ id: string; content: Content } | null>(null)
+  const [opening, setOpening] = useState<string | null>(null)
+  const preload = useRef<{ id: string; content: Promise<Content> } | null>(null)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>('updated')
   const [collapsed, setCollapsed] = useState(narrow.matches)
@@ -48,10 +50,26 @@ export default function App() {
 
   if (!db) return null
 
+  // Loading starts when the finger touches the card, so it is usually done by the time the tap ends.
+  const prefetch = (id: string) => {
+    if (preload.current?.id === id) return
+    const content = loadStrokes(id)
+    content.catch(() => {})
+    preload.current = { id, content }
+  }
   const openNote = async (id: string) => {
+    prefetch(id)
+    const pending = preload.current!.content
+    preload.current = null
+    setOpening(id)
     try {
-      setOpened({ id, content: await loadStrokes(id) })
+      const content = await pending
+      setOpening((cur) => {
+        if (cur === id) setOpened({ id, content })
+        return null
+      })
     } catch (e) {
+      setOpening(null)
       alert(e instanceof Error ? e.message : String(e))
     }
   }
@@ -90,8 +108,8 @@ export default function App() {
   }
 
   const open = opened && db.notes.find((n) => n.id === opened.id)
-  if (open) {
-    return (
+  const openingNote = opening ? db.notes.find((n) => n.id === opening) : null
+  const editor = open ? (
       <Editor
         key={open.id}
         note={open}
@@ -101,8 +119,17 @@ export default function App() {
         onUpdate={(patch, touch) => updateNote(open.id, patch, touch)}
         onContent={(content) => updateStrokes(open.id, content)}
       />
-    )
-  }
+    ) : openingNote ? (
+      // Shown at once while the note loads.
+      <div className="editor">
+        <header className="editor-bar">
+          <button className="icon-btn" onClick={() => setOpening(null)} title="Back">
+            <ArrowLeft size={20} />
+          </button>
+          <div className="title-input">{openingNote.title || 'Untitled'}</div>
+        </header>
+      </div>
+    ) : null
 
   const heading =
     view.kind === 'all'
@@ -120,6 +147,9 @@ export default function App() {
   const nextSort: Record<Sort, Sort> = { updated: 'created', created: 'title', title: 'updated' }
 
   return (
+    <>
+    {/* The list stays mounted while a note is open, so going back is instant. */}
+    <Activity mode={editor ? 'hidden' : 'visible'}>
     <div className="app">
       <Sidebar
         db={db}
@@ -190,7 +220,11 @@ export default function App() {
           <div className="grid">
             {notes.map((n) => (
               <div key={n.id} className="card">
-                <button className="thumb" onClick={() => !n.trashed && openNote(n.id)}>
+                <button
+                  className="thumb"
+                  onPointerDown={() => !n.trashed && prefetch(n.id)}
+                  onClick={() => !n.trashed && openNote(n.id)}
+                >
                   <Thumbnail note={n} />
                 </button>
                 <div className="card-actions">
@@ -235,5 +269,8 @@ export default function App() {
         )}
       </main>
     </div>
+    </Activity>
+    {editor}
+    </>
   )
 }

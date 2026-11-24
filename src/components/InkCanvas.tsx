@@ -123,6 +123,7 @@ export default function InkCanvas(props: Props) {
     contentBottom: 0,
     tiles: new Map<string, HTMLCanvasElement>(), // rendered at `tileZoom`, keyed "col,row"
     tileZoom: 0,
+    tileBase: '',
     tilePages: 0,
     oldTiles: new Map<string, HTMLCanvasElement>(), // previous zoom level; shown scaled until replaced
     oldZoom: 1,
@@ -400,8 +401,11 @@ export default function InkCanvas(props: Props) {
 
     const layout = () => {
       const r = wrap.getBoundingClientRect()
-      s.dpr = window.devicePixelRatio || 1
-      s.bg = getComputedStyle(wrap).getPropertyValue('--canvas-bg').trim() || s.bg
+      const dpr = window.devicePixelRatio || 1
+      const bg = getComputedStyle(wrap).getPropertyValue('--canvas-bg').trim() || s.bg
+      if (r.width === s.w && r.height === s.h && dpr === s.dpr && bg === s.bg) return
+      s.dpr = dpr
+      s.bg = bg
       s.w = r.width
       s.h = r.height
       s.fit = Math.min(1.6, Math.max(0.3, (r.width - 48) / PAGE_W))
@@ -413,11 +417,13 @@ export default function InkCanvas(props: Props) {
       canvas.style.width = r.width + 'px'
       canvas.style.height = r.height + 'px'
       clampScroll()
-      s.tileZoom = s.zoom
-      freeTiles(s.tiles)
-      renderCommitted()
-      present()
-      placeEditor()
+      // Tiles depend on zoom, resolution and background only, not on the view's height.
+      if (s.tileZoom !== s.zoom || s.tileBase !== s.dpr + bg) {
+        s.tileZoom = s.zoom
+        s.tileBase = s.dpr + bg
+        invalidate()
+      }
+      frame() // missing tiles fill in over the next frames, so opening a big note doesn't block
     }
 
     const toPage = (e: PointerEvent): Point => {
@@ -864,6 +870,21 @@ export default function InkCanvas(props: Props) {
 
     // Exposed so the props effect below can re-render.
     rerender.current = () => {
+      const { full, box } = diffContent()
+      const p = propsRef.current
+      s.selIds = new Set(p.selection)
+      if (s.mode !== 'erase') s.erasing.clear()
+      if (s.mode !== 'move') s.moveDelta = [0, 0]
+      if (s.mode !== 'resize') s.resize = null
+      clampScroll()
+      if (full) renderCommitted()
+      else if (box) renderCommitted(box)
+      else compose(FRAME_BUDGET)
+      present()
+      placeEditor()
+    }
+    /** What changed since the last render: everything (`full`) or the page area `box`. */
+    const diffContent = () => {
       const p = propsRef.current
       computeContent()
       // Tiles only need re-rendering where something changed.
@@ -881,21 +902,12 @@ export default function InkCanvas(props: Props) {
       s.prevItems = items
       s.prevPaper = p.paper
       s.prevEditing = p.editing
-      s.selIds = new Set(p.selection)
-      if (s.mode !== 'erase') s.erasing.clear()
-      if (s.mode !== 'move') s.moveDelta = [0, 0]
-      if (s.mode !== 'resize') s.resize = null
-      clampScroll()
-      if (full) renderCommitted()
-      else if (box) renderCommitted(box)
-      else compose()
-      present()
-      placeEditor()
+      return { full, box: box as Box | null }
     }
     propsRef.current.api.current = {
       center: () => [PAGE_W / 2, (s.scrollY + s.h / 3 - TOP) / s.zoom],
     }
-    computeContent()
+    diffContent()
     layout()
 
     return () => {
