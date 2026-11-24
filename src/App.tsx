@@ -4,9 +4,9 @@ import Sidebar from './components/Sidebar'
 import Thumbnail from './components/Thumbnail'
 import Editor from './components/Editor'
 import { useNotesDB } from './store'
-import { pageCount, uid } from './ink'
+import { uid } from './ink'
 import { importSdocx } from './sdocx'
-import type { Note, View } from './types'
+import type { Stroke, View } from './types'
 
 type Sort = 'updated' | 'created' | 'title'
 
@@ -15,13 +15,13 @@ const narrow = matchMedia('(max-width: 900px)')
 const fmt = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
 
 export default function App() {
-  const { db, status, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
+  const { db, status, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
-  const [openId, setOpenId] = useState<string | null>(null)
+  const [opened, setOpened] = useState<{ id: string; strokes: Stroke[] } | null>(null)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>('updated')
   const [collapsed, setCollapsed] = useState(narrow.matches)
-  const [importing, setImporting] = useState(false)
+  const [importing, setImporting] = useState<string | null>(null)
 
   useEffect(() => {
     const onChange = () => setCollapsed(narrow.matches)
@@ -46,44 +46,57 @@ export default function App() {
 
   if (!db) return null
 
+  const openNote = async (id: string) => {
+    try {
+      setOpened({ id, strokes: await loadStrokes(id) })
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  // One file at a time, so even hundreds of big notes never sit in memory together.
   const importFiles = async (files: File[]) => {
     if (!files.length) return
-    setImporting(true)
-    const imported: Note[] = []
+    let done = 0
     const failed: string[] = []
     for (const file of files) {
+      setImporting(`Importing ${++done}/${files.length}…`)
+      await new Promise((r) => setTimeout(r)) // let the page repaint
       try {
         const r = await importSdocx(await file.arrayBuffer(), file.name)
         const now = Date.now()
-        imported.push({
-          id: uid(),
-          title: r.title,
-          folderId: view.kind === 'folder' ? view.id : null,
-          favorite: false,
-          trashed: false,
-          createdAt: file.lastModified || now,
-          updatedAt: now,
-          strokes: r.strokes,
-          paper: 'plain',
-        })
+        await addNote(
+          {
+            id: uid(),
+            title: r.title,
+            folderId: view.kind === 'folder' ? view.id : null,
+            favorite: false,
+            trashed: false,
+            createdAt: file.lastModified || now,
+            updatedAt: now,
+            paper: 'plain',
+          },
+          r.strokes,
+        )
       } catch (e) {
         failed.push(`${file.name}: ${e instanceof Error ? e.message : e}`)
       }
     }
-    addNotes(imported)
-    setImporting(false)
-    if (failed.length) alert(`Imported ${imported.length} note(s). Could not import:\n${failed.join('\n')}`)
+    setImporting(null)
+    if (failed.length) alert(`Imported ${files.length - failed.length} note(s). Could not import:\n${failed.join('\n')}`)
   }
 
-  const open = openId ? db.notes.find((n) => n.id === openId) : null
+  const open = opened && db.notes.find((n) => n.id === opened.id)
   if (open) {
     return (
       <Editor
         key={open.id}
         note={open}
+        initialStrokes={opened.strokes}
         folders={db.folders}
-        onBack={() => setOpenId(null)}
+        onBack={() => setOpened(null)}
         onUpdate={(patch, touch) => updateNote(open.id, patch, touch)}
+        onStrokes={(strokes) => updateStrokes(open.id, strokes)}
       />
     )
   }
@@ -148,12 +161,12 @@ export default function App() {
           )}
           {view.kind !== 'trash' && (
             <label className="text-btn" title="Import handwriting from Samsung Notes (.sdocx)">
-              <FileInput size={14} /> {importing ? 'Importing…' : 'Import Samsung Notes'}
+              <FileInput size={14} /> {importing ?? 'Import Samsung Notes'}
               <input
                 type="file"
                 multiple
                 hidden
-                disabled={importing}
+                disabled={!!importing}
                 onChange={(e) => {
                   importFiles([...(e.target.files ?? [])])
                   e.target.value = ''
@@ -172,7 +185,7 @@ export default function App() {
           <div className="grid">
             {notes.map((n) => (
               <div key={n.id} className="card">
-                <button className="thumb" onClick={() => !n.trashed && setOpenId(n.id)}>
+                <button className="thumb" onClick={() => !n.trashed && openNote(n.id)}>
                   <Thumbnail note={n} />
                 </button>
                 <div className="card-actions">
@@ -198,7 +211,7 @@ export default function App() {
                 <div className="card-title">{n.title || 'Untitled'}</div>
                 <div className="card-date">
                   {fmt(n.updatedAt)}
-                  {pageCount(n.strokes) > 1 && ` · ${pageCount(n.strokes)} pages`}
+                  {(n.pages ?? 1) > 1 && ` · ${n.pages} pages`}
                   {n.favorite && <Star size={12} className="star" fill="currentColor" />}
                 </div>
               </div>
@@ -210,7 +223,7 @@ export default function App() {
           <button
             className="fab"
             title="New note"
-            onClick={() => setOpenId(createNote(view.kind === 'folder' ? view.id : null))}
+            onClick={() => openNote(createNote(view.kind === 'folder' ? view.id : null))}
           >
             <SquarePen size={22} />
           </button>

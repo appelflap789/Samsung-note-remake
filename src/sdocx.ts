@@ -18,7 +18,7 @@ export interface ImportedNote {
 
 // ---- minimal ZIP reader (stored + deflate, via the browser's DecompressionStream) ----
 
-async function unzip(buf: Uint8Array): Promise<Map<string, Uint8Array>> {
+async function unzip(buf: Uint8Array, want: (name: string) => boolean): Promise<Map<string, Uint8Array>> {
   const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
   let eocd = -1
   for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
@@ -40,6 +40,7 @@ async function unzip(buf: Uint8Array): Promise<Map<string, Uint8Array>> {
     const local = dv.getUint32(p + 42, true)
     const name = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nameLen))
     p += 46 + skip
+    if (!want(name)) continue // skip images, PDFs, etc.
     const start = local + 30 + dv.getUint16(local + 26, true) + dv.getUint16(local + 28, true)
     const raw = buf.subarray(start, start + size)
     if (method === 0) files.set(name, raw)
@@ -195,6 +196,8 @@ function pageOrder(b: Uint8Array): string[] {
   return ids
 }
 
+const round = (v: number, f: number) => Math.round(v * f) / f
+
 const hex = (n: number) => n.toString(16).padStart(2, '0')
 
 /** Samsung exports are named "<title>_<yymmdd>_<hhmmss>.sdocx". */
@@ -202,7 +205,7 @@ export const titleFromFileName = (name: string) =>
   name.replace(/\.sdocx$/i, '').replace(/_\d{6}_\d{6}( \(\d+\))?$/, '')
 
 export async function importSdocx(data: ArrayBuffer, fileName: string): Promise<ImportedNote> {
-  const files = await unzip(new Uint8Array(data))
+  const files = await unzip(new Uint8Array(data), (n) => n.endsWith('.page') || n === 'pageIdInfo.dat')
   const pageFiles = [...files.keys()].filter((k) => k.endsWith('.page'))
   if (!pageFiles.length) throw new Error('No pages found in this file.')
 
@@ -229,7 +232,8 @@ export async function importSdocx(data: ArrayBuffer, fileName: string): Promise<
     for (const s of page.strokes) {
       const argb = s.color ?? 0xff000000
       const alpha = (argb >>> 24) & 0xff
-      const pts: Point[] = s.points.map(([x, y, p]) => [x * scale, top + y * scale, p])
+      // Rounded: far below a pixel, but keeps big notes several times smaller.
+      const pts: Point[] = s.points.map(([x, y, p]) => [round(x * scale, 100), round(top + y * scale, 100), round(p, 1000)])
       for (const pt of pts) bottom = Math.max(bottom, pt[1])
       strokes.push({
         id: uid(),

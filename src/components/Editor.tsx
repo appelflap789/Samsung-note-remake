@@ -43,13 +43,15 @@ const pushRecent = (list: string[], c: string) => [c, ...list.filter((x) => x !=
 
 interface Props {
   note: Note
+  initialStrokes: Stroke[]
   folders: Folder[]
   onBack: () => void
   onUpdate: (patch: Partial<Note>, touch?: boolean) => void
+  onStrokes: (strokes: Stroke[]) => void
 }
 
-export default function Editor({ note, folders, onBack, onUpdate }: Props) {
-  const [strokes, setStrokes] = useState(note.strokes)
+export default function Editor({ note, initialStrokes, folders, onBack, onUpdate, onStrokes }: Props) {
+  const [strokes, setStrokes] = useState(initialStrokes)
   const [tool, setToolState] = useState<Tool>('pen')
   const [cfg, setCfg] = useState(loadSettings)
   const [menu, setMenu] = useState(false)
@@ -81,10 +83,10 @@ export default function Editor({ note, folders, onBack, onUpdate }: Props) {
     (next: Stroke[]) => {
       strokesRef.current = next
       setStrokes(next)
-      onUpdate({ strokes: next })
+      onStrokes(next)
       force((n) => n + 1)
     },
-    [onUpdate],
+    [onStrokes],
   )
 
   const push = (op: Op) => {

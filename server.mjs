@@ -1,13 +1,15 @@
 // Serves the built app and stores notes as JSON files in DATA_DIR.
 // No dependencies: run with `node server.mjs` after `npm run build`.
 import { createServer } from 'node:http'
+import { createReadStream } from 'node:fs'
 import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
 import { extname, join, normalize } from 'node:path'
 
 const PORT = Number(process.env.PORT ?? 8080)
 const DATA = process.env.DATA_DIR ?? './data'
 const DIST = new URL('./dist/', import.meta.url).pathname
-const NOTES = join(DATA, 'notes')
+const NOTES = join(DATA, 'notes') // <id>.json: note without strokes
+const STROKES = join(DATA, 'strokes') // <id>.json: the note's strokes array
 const FOLDERS = join(DATA, 'folders.json')
 const MAX_BODY = 50 * 1024 * 1024
 
@@ -23,12 +25,30 @@ const TYPES = {
 }
 
 await mkdir(NOTES, { recursive: true })
+await mkdir(STROKES, { recursive: true })
 
 /** Write via a temp file + rename so a crash never leaves a half-written note. */
 async function writeAtomic(file, data) {
   const tmp = `${file}.${process.pid}.tmp`
   await writeFile(tmp, data)
   await rename(tmp, file)
+}
+
+// Note list kept in memory; `version` changes on every write so clients can poll cheaply.
+const notes = new Map()
+let version = Date.now()
+const etag = () => `"${version}"`
+
+for (const f of await readdir(NOTES)) {
+  if (!f.endsWith('.json')) continue
+  const note = JSON.parse(await readFile(join(NOTES, f), 'utf8'))
+  if (note.strokes) {
+    // Older format kept strokes inside the note file: split them out once.
+    const { strokes, ...meta } = note
+    await writeAtomic(join(STROKES, f), JSON.stringify(strokes))
+    await writeAtomic(join(NOTES, f), JSON.stringify(meta))
+    notes.set(meta.id, meta)
+  } else notes.set(note.id, note)
 }
 
 async function readBody(req) {
@@ -49,30 +69,56 @@ const send = (res, status, body) => {
 
 async function api(req, res, path) {
   if (path === '/api/db' && req.method === 'GET') {
-    const notes = []
-    for (const f of await readdir(NOTES)) {
-      if (f.endsWith('.json')) notes.push(JSON.parse(await readFile(join(NOTES, f), 'utf8')))
+    if (req.headers['if-none-match'] === etag()) {
+      res.writeHead(304, { etag: etag(), 'cache-control': 'no-cache' })
+      return res.end()
     }
     const folders = JSON.parse(await readFile(FOLDERS, 'utf8').catch(() => '[]'))
-    return send(res, 200, { notes, folders })
+    res.writeHead(200, { 'content-type': 'application/json', etag: etag(), 'cache-control': 'no-cache' })
+    return res.end(JSON.stringify({ notes: [...notes.values()], folders }))
   }
   if (path === '/api/folders' && req.method === 'PUT') {
     const folders = await readBody(req)
     if (!Array.isArray(folders)) return send(res, 400, { error: 'Expected an array' })
     await writeAtomic(FOLDERS, JSON.stringify(folders))
+    version++
     return send(res, 204)
   }
-  const m = /^\/api\/notes\/([\w-]{1,64})$/.exec(path)
+  const m = /^\/api\/notes\/([\w-]{1,64})(\/strokes)?$/.exec(path)
   if (m) {
-    const file = join(NOTES, `${m[1]}.json`)
+    const [, id, strokesPath] = m
+    const noteFile = join(NOTES, `${id}.json`)
+    const strokesFile = join(STROKES, `${id}.json`)
+    if (strokesPath && req.method === 'GET') {
+      const stream = createReadStream(strokesFile)
+      stream.once('open', () => {
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        stream.pipe(res)
+      })
+      stream.once('error', () => send(res, 404, { error: 'Not found' }))
+      return
+    }
+    if (strokesPath && req.method === 'PUT') {
+      const strokes = await readBody(req)
+      if (!Array.isArray(strokes)) return send(res, 400, { error: 'Expected an array' })
+      await writeAtomic(strokesFile, JSON.stringify(strokes))
+      return send(res, 204)
+    }
+    if (strokesPath) return send(res, 405, { error: 'Method not allowed' })
     if (req.method === 'PUT') {
       const note = await readBody(req)
-      if (note?.id !== m[1]) return send(res, 400, { error: 'Note id mismatch' })
-      await writeAtomic(file, JSON.stringify(note))
+      if (note?.id !== id) return send(res, 400, { error: 'Note id mismatch' })
+      delete note.strokes
+      await writeAtomic(noteFile, JSON.stringify(note))
+      notes.set(id, note)
+      version++
       return send(res, 204)
     }
     if (req.method === 'DELETE') {
-      await rm(file, { force: true })
+      await rm(noteFile, { force: true })
+      await rm(strokesFile, { force: true })
+      notes.delete(id)
+      version++
       return send(res, 204)
     }
   }

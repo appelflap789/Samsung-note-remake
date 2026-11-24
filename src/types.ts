@@ -29,9 +29,19 @@ export interface Note {
   trashed: boolean
   createdAt: number
   updatedAt: number
-  strokes: Stroke[]
   /** Missing on notes created before paper templates existed. */
   paper?: Paper
+  /** Changes whenever the strokes change; tells devices their stored copy is stale. */
+  sv?: string
+  /** Small image of the first page (data URL). */
+  thumb?: string
+  pages?: number
+}
+
+/** Strokes are stored and synced separately from the note list, and loaded only when a note is opened. */
+export interface StrokesRecord {
+  sv?: string
+  strokes: Stroke[]
 }
 
 export interface Folder {

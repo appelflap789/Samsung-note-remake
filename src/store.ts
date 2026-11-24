@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { get, set } from 'idb-keyval'
-import type { DB, Folder, Note } from './types'
-import { uid } from './ink'
+import { del, get, set } from 'idb-keyval'
+import type { DB, Folder, Note, Stroke, StrokesRecord } from './types'
+import { pageCount, renderThumb, uid } from './ink'
 
-const KEY = 'samsung-notes-db-v1'
+const KEY = 'samsung-notes-db-v2'
+const OLD_KEY = 'samsung-notes-db-v1' // notes with strokes inline
 const PENDING_KEY = 'samsung-notes-pending-v1'
 const API = `${import.meta.env.BASE_URL}api`
 const PULL_EVERY = 60_000
@@ -21,6 +22,13 @@ interface Pending {
   folders: boolean
 }
 
+const strokesKey = (id: string) => `samsung-notes-strokes:${id}`
+
+// Strokes edited in the open note, not yet written to IndexedDB.
+const live = new Map<string, StrokesRecord>()
+const readStrokes = async (id: string) => live.get(id) ?? (await get<StrokesRecord>(strokesKey(id)))
+const flushLive = () => Promise.all([...live].map(([id, rec]) => set(strokesKey(id), rec)))
+
 export function useNotesDB() {
   const [db, setDb] = useState<DB | null>(null)
   const [status, setStatus] = useState<SyncStatus>('syncing')
@@ -34,6 +42,8 @@ export function useNotesDB() {
   const serverless = useRef(false)
   const busy = useRef<Promise<void> | null>(null)
   const again = useRef<'push' | 'pull' | null>(null)
+  const etag = useRef<string | null>(null)
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
 
   const savePending = () =>
     set(PENDING_KEY, { notes: [...pending.current.notes], folders: pending.current.folders } satisfies Pending)
@@ -99,7 +109,16 @@ export function useNotesDB() {
   async function push() {
     const p = pending.current
     for (const id of [...p.notes]) {
+      if (timers.current.has(id)) continue // still being written in; uploaded once the pen rests
       const note = latest.current?.notes.find((n) => n.id === id)
+      if (note && synced.current.get(id)?.sv !== note.sv) {
+        // Strokes changed (or the server may not have them): upload them before the note that points at them.
+        const rec = await readStrokes(id)
+        if (rec && rec.sv === note.sv) {
+          const res = await fetch(`${API}/notes/${id}/strokes`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rec.strokes) })
+          if (!res.ok) throw new Error(`Saving strokes failed (${res.status})`)
+        }
+      }
       const res = note
         ? await fetch(`${API}/notes/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(note) })
         : await fetch(`${API}/notes/${id}`, { method: 'DELETE' })
@@ -125,13 +144,15 @@ export function useNotesDB() {
   }
 
   async function pullFromServer() {
-    const res = await fetch(`${API}/db`, { cache: 'no-store' })
+    const res = await fetch(`${API}/db`, { cache: 'no-store', headers: etag.current ? { 'if-none-match': etag.current } : {} })
+    if (res.status === 304) return
     if (res.status === 404 || !res.headers.get('content-type')?.includes('json')) {
       serverless.current = true
       throw new Error('serverless')
     }
     if (!res.ok) throw new Error(`Loading notes failed (${res.status})`)
     const server: DB = await res.json()
+    etag.current = res.headers.get('etag')
     const local = latest.current ?? { notes: [], folders: [] }
     // Capture edits made since the last debounce tick before the server copy replaces them.
     if (collectChanges(local)) await savePending()
@@ -140,7 +161,10 @@ export function useNotesDB() {
     syncedFolders.current = server.folders
     // Server wins, except for things changed here that haven't been uploaded yet.
     const notes = server.notes.filter((n) => !p.notes.has(n.id))
-    for (const n of local.notes) if (p.notes.has(n.id)) notes.push(n)
+    for (const n of local.notes) {
+      if (p.notes.has(n.id)) notes.push(n)
+      else if (!synced.current.has(n.id)) del(strokesKey(n.id)) // deleted elsewhere
+    }
     notes.sort((a, b) => b.updatedAt - a.updatedAt)
     const next = { notes, folders: p.folders ? local.folders : server.folders }
     latest.current = next
@@ -148,15 +172,17 @@ export function useNotesDB() {
   }
 
   useEffect(() => {
-    Promise.all([get<DB>(KEY), get<Pending>(PENDING_KEY)]).then(([d, pend]) => {
-      const local = d ?? { notes: [], folders: [] }
+    const load = async () => {
+      const [d, pend] = await Promise.all([get<DB>(KEY), get<Pending>(PENDING_KEY)])
       pending.current = { notes: new Set(pend?.notes ?? []), folders: pend?.folders ?? false }
+      const local = d ?? (await migrate(pending.current))
       for (const n of local.notes) if (!pending.current.notes.has(n.id)) synced.current.set(n.id, n)
       syncedFolders.current = pending.current.folders ? null : local.folders
       latest.current = local
       setDb(local)
       sync(true).catch(() => {})
-    })
+    }
+    load()
   }, [sync])
 
   // Debounced: persist locally, record what changed, upload it.
@@ -176,7 +202,10 @@ export function useNotesDB() {
   }, [db, sync])
 
   useEffect(() => {
-    const flush = () => latest.current && set(KEY, latest.current)
+    const flush = () => {
+      flushLive()
+      if (latest.current) set(KEY, latest.current)
+    }
     const onVisible = () => {
       if (document.visibilityState === 'hidden') flush()
       else sync(true)
@@ -205,20 +234,70 @@ export function useNotesDB() {
 
   const createNote = useCallback((folderId: string | null): string => {
     const now = Date.now()
-    const note: Note = { id: uid(), title: '', folderId, favorite: false, trashed: false, createdAt: now, updatedAt: now, strokes: [], paper: 'plain' }
+    const note: Note = { id: uid(), title: '', folderId, favorite: false, trashed: false, createdAt: now, updatedAt: now, paper: 'plain', sv: uid() }
+    live.set(note.id, { sv: note.sv, strokes: [] })
     setDb((d) => d && { ...d, notes: [note, ...d.notes] })
     return note.id
   }, [])
 
-  const addNotes = useCallback((notes: Note[]) => {
-    setDb((d) => d && { ...d, notes: [...notes, ...d.notes] })
+  /** Add a finished note (e.g. imported); its strokes go straight to storage. */
+  const addNote = useCallback(async (note: Omit<Note, 'sv' | 'thumb' | 'pages'>, strokes: Stroke[]) => {
+    const full: Note = { ...note, sv: uid(), thumb: renderThumb(strokes), pages: pageCount(strokes) }
+    await set(strokesKey(full.id), { sv: full.sv, strokes } satisfies StrokesRecord)
+    setDb((d) => d && { ...d, notes: [full, ...d.notes] })
+  }, [])
+
+  /** Strokes of one note, from this device or else downloaded from the server. */
+  const loadStrokes = useCallback(async (id: string): Promise<Stroke[]> => {
+    const note = latest.current?.notes.find((n) => n.id === id)
+    const rec = await readStrokes(id)
+    if (rec && (!note || rec.sv === note.sv || serverless.current)) return rec.strokes
+    let strokes: Stroke[]
+    try {
+      const res = await fetch(`${API}/notes/${id}/strokes`, { cache: 'no-store' })
+      if (res.status === 404 || !res.headers.get('content-type')?.includes('json')) return rec?.strokes ?? []
+      if (!res.ok) throw new Error(`Loading note failed (${res.status})`)
+      strokes = await res.json()
+    } catch (e) {
+      if (rec) return rec.strokes
+      throw e instanceof TypeError ? new Error("This note isn't on this device yet. Connect to your home server to open it.") : e
+    }
+    await set(strokesKey(id), { sv: note?.sv, strokes } satisfies StrokesRecord)
+    if (note && !note.thumb) {
+      const thumb = renderThumb(strokes)
+      const pages = pageCount(strokes)
+      setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id ? { ...n, thumb, pages } : n)) })
+    }
+    return strokes
+  }, [])
+
+  /** Called on every edit in the open note; storage and thumbnail are updated shortly after. */
+  const updateStrokes = useCallback((id: string, strokes: Stroke[]) => {
+    const sv = uid()
+    const rec: StrokesRecord = { sv, strokes }
+    live.set(id, rec)
+    setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id ? { ...n, sv, updatedAt: Date.now() } : n)) })
+    clearTimeout(timers.current.get(id))
+    timers.current.set(
+      id,
+      setTimeout(async () => {
+        timers.current.delete(id)
+        const thumb = renderThumb(strokes)
+        const pages = pageCount(strokes)
+        setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id && n.sv === sv ? { ...n, thumb, pages } : n)) })
+        await set(strokesKey(id), rec)
+        if (live.get(id) === rec) live.delete(id)
+      }, 1500),
+    )
   }, [])
 
   const deleteNoteForever = useCallback((id: string) => {
+    del(strokesKey(id))
     setDb((d) => d && { ...d, notes: d.notes.filter((n) => n.id !== id) })
   }, [])
 
   const emptyTrash = useCallback(() => {
+    for (const n of latest.current?.notes ?? []) if (n.trashed) del(strokesKey(n.id))
     setDb((d) => d && { ...d, notes: d.notes.filter((n) => !n.trashed) })
   }, [])
 
@@ -237,5 +316,23 @@ export function useNotesDB() {
     )
   }, [])
 
-  return { db, status, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
+  return { db, status, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
+}
+
+/** Move notes saved by older versions (strokes inside each note) to per-note stroke records. */
+async function migrate(pending: { notes: Set<string> }): Promise<DB> {
+  const old = await get<{ notes: (Note & { strokes?: Stroke[] })[]; folders: Folder[] }>(OLD_KEY)
+  const db: DB = { notes: [], folders: old?.folders ?? [] }
+  for (const { strokes = [], ...note } of old?.notes ?? []) {
+    const sv = uid()
+    await set(strokesKey(note.id), { sv, strokes } satisfies StrokesRecord)
+    db.notes.push({ ...note, sv, thumb: renderThumb(strokes), pages: pageCount(strokes) })
+    pending.notes.add(note.id) // upload the new thumbnail (and strokes, if the server lacks them)
+  }
+  await set(KEY, db)
+  if (old) {
+    await set(PENDING_KEY, { notes: [...pending.notes], folders: false } satisfies Pending)
+    await del(OLD_KEY)
+  }
+  return db
 }

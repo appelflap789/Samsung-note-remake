@@ -212,3 +212,22 @@ export function hitStroke(s: Stroke, x: number, y: number, r: number): boolean {
 }
 
 export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+
+const THUMB_W = 240
+
+/** Render the first page to a small image, so the note list never needs the strokes themselves. */
+export function renderThumb(strokes: Stroke[]): string {
+  const c = document.createElement('canvas')
+  c.width = THUMB_W
+  c.height = Math.round((THUMB_W * PAGE_H) / PAGE_W)
+  const ctx = c.getContext('2d')!
+  ctx.scale(THUMB_W / PAGE_W, THUMB_W / PAGE_W)
+  for (const s of strokes) {
+    if (strokeBounds(s)[1] >= PAGE_H) continue
+    ctx.globalAlpha = strokeOpacity(s)
+    ctx.globalCompositeOperation = s.tool === 'highlighter' ? 'multiply' : 'source-over'
+    ctx.fillStyle = s.color
+    ctx.fill(strokePath(s))
+  }
+  return c.toDataURL('image/webp', 0.8)
+}

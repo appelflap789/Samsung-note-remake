@@ -1,22 +1,7 @@
-import { useMemo } from 'react'
-import { PAGE_H, PAGE_W, PAPER_GAP as G, strokeBounds, strokeD, strokeOpacity } from '../ink'
+import { PAGE_H, PAGE_W, PAPER_GAP as G } from '../ink'
 import type { Note } from '../types'
 
 export default function Thumbnail({ note }: { note: Note }) {
-  const paths = useMemo(
-    () =>
-      note.strokes
-        .filter((s) => strokeBounds(s)[1] < PAGE_H)
-        .map((s) => (
-          <path
-            key={s.id}
-            d={strokeD(s)}
-            fill={s.color}
-            style={{ opacity: strokeOpacity(s), mixBlendMode: s.tool === 'highlighter' ? 'multiply' : undefined }}
-          />
-        )),
-    [note.strokes],
-  )
   const paper = note.paper ?? 'plain'
   return (
     <svg className="thumb-svg" viewBox={`0 0 ${PAGE_W} ${PAGE_H}`} preserveAspectRatio="xMidYMin slice">
@@ -34,7 +19,7 @@ export default function Thumbnail({ note }: { note: Note }) {
           <rect width={PAGE_W} height={PAGE_H} fill={`url(#p-${note.id})`} />
         </>
       )}
-      {paths}
+      {note.thumb && <image href={note.thumb} width={PAGE_W} height={PAGE_H} />}
     </svg>
   )
 }
