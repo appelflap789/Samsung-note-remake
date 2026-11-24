@@ -34,6 +34,7 @@ export default function App() {
       if (view.kind === 'trash' ? !n.trashed : n.trashed) return false
       if (view.kind === 'favorites' && !n.favorite) return false
       if (view.kind === 'folder' && n.folderId !== view.id) return false
+      if (view.kind === 'folders' && n.folderId) return false
       return !q || (n.title || 'Untitled').toLowerCase().includes(q)
     })
     return list.sort((a, b) =>
@@ -63,6 +64,8 @@ export default function App() {
         ? 'Favorites'
         : view.kind === 'trash'
           ? 'Trash'
+          : view.kind === 'folders'
+            ? 'Folders'
           : (db.folders.find((f) => f.id === view.id)?.name ?? 'Folder')
 
   const sortLabel = { updated: 'Date modified', created: 'Date created', title: 'Title' }[sort]
@@ -90,6 +93,21 @@ export default function App() {
             <Search size={16} />
           </label>
         </div>
+        {view.kind === 'folders' && (
+          <>
+            <div className="folders-summary">
+              {db.folders.length} folders, {notes.length} notes
+            </div>
+            <div className="folder-tiles">
+              {db.folders.map((f) => (
+                <button key={f.id} className="folder-tile" onClick={() => setView({ kind: 'folder', id: f.id })}>
+                  <span className="folder-tile-count">{db.notes.filter((n) => !n.trashed && n.folderId === f.id).length}</span>
+                  <span className="folder-tile-name">{f.name}</span>
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <div className="main-sub">
           {view.kind === 'trash' && notes.length > 0 && (
             <button className="text-btn danger" onClick={() => confirm('Permanently delete all notes in Trash?') && emptyTrash()}>
@@ -101,7 +119,7 @@ export default function App() {
           </button>
         </div>
 
-        {notes.length === 0 ? (
+        {notes.length === 0 && view.kind === 'folders' ? null : notes.length === 0 ? (
           <div className="empty">{view.kind === 'trash' ? 'Trash is empty' : 'No notes yet. Tap the pen button to start writing.'}</div>
         ) : (
           <div className="grid">

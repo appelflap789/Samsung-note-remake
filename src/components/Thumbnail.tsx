@@ -1,5 +1,5 @@
 import { useMemo } from 'react'
-import { PAGE_H, PAGE_W, PAPER_GAP as G, strokeBounds, strokeD } from '../ink'
+import { PAGE_H, PAGE_W, PAPER_GAP as G, strokeBounds, strokeD, strokeOpacity } from '../ink'
 import type { Note } from '../types'
 
 export default function Thumbnail({ note }: { note: Note }) {
@@ -12,7 +12,7 @@ export default function Thumbnail({ note }: { note: Note }) {
             key={s.id}
             d={strokeD(s)}
             fill={s.color}
-            style={s.tool === 'highlighter' ? { opacity: 0.45, mixBlendMode: 'multiply' } : undefined}
+            style={{ opacity: strokeOpacity(s), mixBlendMode: s.tool === 'highlighter' ? 'multiply' : undefined }}
           />
         )),
     [note.strokes],

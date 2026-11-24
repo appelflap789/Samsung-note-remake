@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FileText, Folder as FolderIcon, FolderPlus, Menu, Star, Trash2, X } from 'lucide-react'
+import { FileText, Folder as FolderIcon, FolderOpen, FolderPlus, Menu, Star, Trash2, X } from 'lucide-react'
 import type { DB, View } from '../types'
 
 interface Props {
@@ -42,11 +42,15 @@ export default function Sidebar({ db, view, collapsed, onToggle, onView, onCreat
       {item({ kind: 'trash' }, <Trash2 size={18} />, 'Trash', db.notes.length - live.length)}
 
       <div className="side-divider" />
-      <div className="side-heading">
-        <FolderIcon size={18} />
-        {!collapsed && <span className="side-label">Folders</span>}
+      <div className="folders-head">
+        {item(
+          { kind: 'folders' },
+          <FolderOpen size={18} />,
+          'Folders',
+          db.folders.length + live.filter((n) => !n.folderId).length,
+        )}
         {!collapsed && (
-          <button className="icon-btn small" onClick={() => setAdding(true)} title="New folder">
+          <button className="icon-btn small folder-add" onClick={() => setAdding(true)} title="New folder">
             <FolderPlus size={16} />
           </button>
         )}

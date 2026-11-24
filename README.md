@@ -18,7 +18,10 @@ Open http://localhost:4173 in Edge → **⋯ → Apps → Install this site as a
 
 ## Pen
 - Pressure-sensitive strokes ([perfect-freehand](https://github.com/steveruizok/perfect-freehand)).
-- Click the **S Pen side button** to toggle the eraser (Android); on Windows, hold it while writing. Debug pen input with `?pendebug`.
+- Tap the active pen/highlighter/eraser again for its menu: pen type (fountain, calligraphy, ballpoint, pencil, brush), size, *Straighten lines*, colours. Settings are remembered.
+- **Hold the pen still** at the end of a stroke to snap it into a line, circle/ellipse, rectangle/square or triangle.
+- **Lasso**: circle strokes to select; drag to move, tap a colour to recolour, or delete.
+- **S Pen side button**: on Android a click arms the eraser for the next stroke (pressed mid-stroke, the rest of that stroke erases); on Windows, hold it while writing. Debug pen input with `?pendebug`.
 - Hand toggle on: fingers scroll, pen draws (palm-friendly). Off: fingers draw too.
 - Ctrl+Z / Ctrl+Y undo/redo. Mouse wheel scrolls; right-drag with a mouse erases.
 

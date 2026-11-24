@@ -1,4 +1,6 @@
-export type Tool = 'pen' | 'highlighter' | 'eraser'
+export type Tool = 'pen' | 'highlighter' | 'eraser' | 'lasso'
+
+export type PenType = 'fountain' | 'calligraphy' | 'ballpoint' | 'pencil' | 'brush'
 
 export type Paper = 'plain' | 'lined' | 'dotted' | 'grid'
 
@@ -12,6 +14,10 @@ export interface Stroke {
   size: number
   /** true when the points carry real stylus pressure */
   pressure: boolean
+  /** Pen nib; missing on older strokes (= fountain). */
+  pen?: PenType
+  /** Snapped geometric shape: rendered without smoothing/thinning so corners stay crisp. */
+  shape?: boolean
   points: Point[]
 }
 
@@ -42,4 +48,5 @@ export type View =
   | { kind: 'all' }
   | { kind: 'favorites' }
   | { kind: 'trash' }
+  | { kind: 'folders' }
   | { kind: 'folder'; id: string }

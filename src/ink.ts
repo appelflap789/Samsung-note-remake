@@ -1,5 +1,5 @@
 import { getStroke, type StrokeOptions } from 'perfect-freehand'
-import type { Paper, Point, Stroke } from './types'
+import type { Paper, PenType, Point, Stroke } from './types'
 
 export const PAGE_W = 1000
 export const PAGE_H = 1414
@@ -39,18 +39,71 @@ export function pageCount(strokes: Stroke[]): number {
   return Math.max(1, Math.floor(m / PAGE_H) + 1)
 }
 
-export function strokeOptions(s: Pick<Stroke, 'tool' | 'size' | 'pressure'>, last = true): StrokeOptions {
+type StrokeStyle = Pick<Stroke, 'tool' | 'size' | 'pressure' | 'pen' | 'shape'>
+
+const PEN_FEEL: Record<Exclude<PenType, 'calligraphy'>, { thinning: number; smoothing: number; streamline: number }> = {
+  fountain: { thinning: 0.6, smoothing: 0.55, streamline: 0.25 },
+  ballpoint: { thinning: 0.15, smoothing: 0.5, streamline: 0.3 },
+  pencil: { thinning: 0.35, smoothing: 0.45, streamline: 0.2 },
+  brush: { thinning: 0.85, smoothing: 0.65, streamline: 0.35 },
+}
+
+export function strokeOptions(s: StrokeStyle, last = true): StrokeOptions {
+  if (s.shape) return { size: s.size, thinning: 0, smoothing: 0, streamline: 0, simulatePressure: false, last }
   if (s.tool === 'highlighter') {
     return { size: s.size, thinning: 0, smoothing: 0.6, streamline: 0.3, simulatePressure: false, last }
   }
+  const pen = s.pen === 'calligraphy' || !s.pen ? 'fountain' : s.pen
   return {
+    ...PEN_FEEL[pen],
     size: s.size,
-    thinning: 0.6,
-    smoothing: 0.55,
-    streamline: 0.25,
     simulatePressure: !s.pressure,
+    ...(pen === 'brush' ? { start: { taper: s.size * 2 }, end: { taper: s.size * 3 } } : {}),
     last,
   }
+}
+
+function convexHull(pts: [number, number][]): [number, number][] {
+  pts.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+  const cross = (o: number[], a: number[], b: number[]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+  const lower: [number, number][] = []
+  const upper: [number, number][] = []
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
+    lower.push(p)
+  }
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i]
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
+    upper.push(p)
+  }
+  return lower.slice(0, -1).concat(upper.slice(0, -1))
+}
+
+/** Calligraphy: a flat 45° nib swept along the path (union of per-segment convex hulls, same winding). */
+function calligraphyD(points: Point[], s: StrokeStyle): string {
+  const nib = (p: Point): [number, number][] => {
+    const a = s.size * 0.75 * (s.pressure ? 0.4 + 0.6 * p[2] : 0.8)
+    const b = Math.max(0.6, s.size * 0.08)
+    const ux = 0.7071 * a, uy = -0.7071 * a, vx = 0.7071 * b, vy = 0.7071 * b
+    return [
+      [p[0] + ux + vx, p[1] + uy + vy],
+      [p[0] + ux - vx, p[1] + uy - vy],
+      [p[0] - ux + vx, p[1] - uy + vy],
+      [p[0] - ux - vx, p[1] - uy - vy],
+    ]
+  }
+  // Light smoothing so the sharp nib doesn't amplify digitizer jitter.
+  const pts: Point[] = []
+  for (const p of points) {
+    const q = pts[pts.length - 1]
+    pts.push(q && !s.shape ? [q[0] + (p[0] - q[0]) * 0.6, q[1] + (p[1] - q[1]) * 0.6, p[2]] : p)
+  }
+  const poly = (h: [number, number][]) => 'M' + h.map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L') + 'Z'
+  if (pts.length === 1) return poly(convexHull(nib(pts[0])))
+  let d = ''
+  for (let i = 1; i < pts.length; i++) d += poly(convexHull([...nib(pts[i - 1]), ...nib(pts[i])]))
+  return d
 }
 
 const avg = (a: number, b: number) => ((a + b) / 2).toFixed(2)
@@ -71,7 +124,8 @@ export function svgPathFromOutline(pts: number[][]): string {
   return d + 'Z'
 }
 
-export function outlineD(points: Point[], s: Pick<Stroke, 'tool' | 'size' | 'pressure'>, last = true) {
+export function outlineD(points: Point[], s: StrokeStyle, last = true) {
+  if (s.tool === 'pen' && s.pen === 'calligraphy') return calligraphyD(points, s)
   return svgPathFromOutline(getStroke(points, strokeOptions(s, last)))
 }
 
@@ -115,9 +169,16 @@ export function strokeBounds(s: Stroke): [number, number, number, number] {
   return b
 }
 
-export function paintPath(ctx: CanvasRenderingContext2D, s: Pick<Stroke, 'tool' | 'color'>, path: Path2D) {
+export const strokeOpacity = (s: Pick<Stroke, 'tool' | 'pen'>) =>
+  s.tool === 'highlighter' ? 0.45 : s.pen === 'pencil' ? 0.82 : 1
+
+export function paintPath(ctx: CanvasRenderingContext2D, s: Pick<Stroke, 'tool' | 'color' | 'pen'>, path: Path2D) {
   ctx.fillStyle = s.color
-  if (s.tool === 'highlighter') {
+  if (s.tool === 'pen' && s.pen === 'pencil') {
+    ctx.globalAlpha = strokeOpacity(s)
+    ctx.fill(path)
+    ctx.globalAlpha = 1
+  } else if (s.tool === 'highlighter') {
     ctx.globalAlpha = 0.45
     ctx.globalCompositeOperation = 'multiply'
     ctx.fill(path)
