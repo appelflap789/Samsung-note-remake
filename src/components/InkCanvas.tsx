@@ -40,6 +40,9 @@ interface Props {
 }
 
 const TOP = 24 // screen px gap above the first page
+const TILE = 512 // device px
+const MAX_TILES = 80
+const FRAME_BUDGET = 10 // ms of tile rendering per animation frame
 const HOLD_MS = 600 // keep the pen still this long to snap the stroke into a shape
 
 type Mode = 'none' | 'draw' | 'erase' | 'pan' | 'pinch' | 'lasso' | 'move' | 'resize'
@@ -70,6 +73,8 @@ function unionBounds(strokes: Stroke[], items: Item[]): Box | null {
  * Low-latency ink surface.
  *  - One opaque, `desynchronized` canvas (front-buffer rendering in Chromium/Edge) that we present to.
  *  - An offscreen canvas holding the committed strokes; each present = blit + live stroke.
+ *  - The committed canvas is composed from cached bitmap tiles, so scrolling and pinching only move
+ *    or scale bitmaps; tiles are re-rendered when their content changes or the zoom settles.
  *  - Input via `pointerrawupdate` (raw digitizer rate) + coalesced events (no dropped samples)
  *    + predicted events (draws slightly ahead of the pen to hide display latency).
  */
@@ -116,6 +121,18 @@ export default function InkCanvas(props: Props) {
     touches: new Map<number, [number, number]>(),
     pinch: null as { d0: number; z0: number; px: number; py: number } | null,
     contentBottom: 0,
+    tiles: new Map<string, HTMLCanvasElement>(), // rendered at `tileZoom`, keyed "col,row"
+    tileZoom: 0,
+    tilePages: 0,
+    oldTiles: new Map<string, HTMLCanvasElement>(), // previous zoom level; shown scaled until replaced
+    oldZoom: 1,
+    pool: [] as HTMLCanvasElement[],
+    raf: 0,
+    settle: 0,
+    prevStrokes: new Set<Stroke>(),
+    prevItems: new Set<Item>(),
+    prevPaper: '' as string,
+    prevEditing: null as string | null,
   }).current
 
   useEffect(() => {
@@ -150,40 +167,160 @@ export default function InkCanvas(props: Props) {
     const HANDLE = 14
     const handleAt = (b: Box): [number, number] => [b[2] + 8, b[3] + 8]
 
-    const renderCommitted = () => {
-      const ctx = s.committed.getContext('2d', { alpha: false })!
+    const freeTiles = (m: Map<string, HTMLCanvasElement>) => {
+      for (const c of m.values()) if (s.pool.length < 16) s.pool.push(c)
+      m.clear()
+    }
+    /** Drops cached tiles overlapping page box b (all tiles when omitted). */
+    const invalidate = (b?: Box) => {
+      freeTiles(s.oldTiles)
+      if (!b) return freeTiles(s.tiles)
+      const k = (s.tileZoom * s.dpr) / TILE
+      const [i0, j0, i1, j1] = [b[0] - 4, b[1] - 4, b[2] + 4, b[3] + 4].map((v) => Math.floor(v * k))
+      for (const [key, c] of s.tiles) {
+        const [i, j] = key.split(',').map(Number)
+        if (i >= i0 && i <= i1 && j >= j0 && j <= j1) {
+          s.tiles.delete(key)
+          if (s.pool.length < 16) s.pool.push(c)
+        }
+      }
+    }
+
+    const renderTile = (i: number, j: number): HTMLCanvasElement => {
+      const p = propsRef.current
+      let c = s.pool.pop()
+      if (!c) {
+        c = document.createElement('canvas')
+        c.width = c.height = TILE
+      }
+      const ctx = c.getContext('2d', { alpha: false })!
+      const k = s.tileZoom * s.dpr
       ctx.setTransform(1, 0, 0, 1, 0, 0)
       ctx.fillStyle = s.bg
-      ctx.fillRect(0, 0, s.committed.width, s.committed.height)
-      pageTransform(ctx)
+      ctx.fillRect(0, 0, TILE, TILE)
+      ctx.setTransform(k, 0, 0, k, -i * TILE, -j * TILE)
+      const x0 = (i * TILE) / k
+      const top = (j * TILE) / k
+      const x1 = x0 + TILE / k
+      const bottom = top + TILE / k
       const n = pages()
       ctx.fillStyle = '#fff'
       ctx.fillRect(0, 0, PAGE_W, n * PAGE_H)
-      const top = s.scrollY / s.zoom - TOP
-      const bottom = top + s.h / s.zoom + TOP
-      drawPaper(ctx, propsRef.current.paper, top, Math.min(bottom, n * PAGE_H), s.zoom)
+      drawPaper(ctx, p.paper, top, Math.min(bottom, n * PAGE_H), s.tileZoom)
       ctx.strokeStyle = '#d6d6d6'
-      ctx.lineWidth = 1 / s.zoom
-      for (let i = 1; i < n; i++) {
+      ctx.lineWidth = 1 / s.tileZoom
+      for (let pg = 1; pg < n; pg++) {
+        if (pg * PAGE_H < top - 2 || pg * PAGE_H > bottom + 2) continue
         ctx.beginPath()
-        ctx.moveTo(0, i * PAGE_H)
-        ctx.lineTo(PAGE_W, i * PAGE_H)
+        ctx.moveTo(0, pg * PAGE_H)
+        ctx.lineTo(PAGE_W, pg * PAGE_H)
         ctx.stroke()
       }
       // Strokes and items being dragged are drawn by present() at their offset instead.
       const skip = moving() ? s.selIds : null
-      for (const it of propsRef.current.items) {
-        if (skip?.has(it.id) || it.id === s.resize?.id || it.id === propsRef.current.editing) continue
+      for (const it of p.items) {
+        if (skip?.has(it.id) || it.id === s.resize?.id || it.id === p.editing) continue
         const b = itemBounds(it)
-        if (b[3] < top || b[1] > bottom) continue
+        if (b[3] < top || b[1] > bottom || b[2] < x0 || b[0] > x1) continue
         drawItem(ctx, it, redraw)
       }
-      for (const st of propsRef.current.strokes) {
+      for (const st of p.strokes) {
         if (s.erasing.has(st.id) || skip?.has(st.id)) continue
         const b = strokeBounds(st)
-        if (b[3] < top || b[1] > bottom) continue
+        if (b[3] < top || b[1] > bottom || b[2] < x0 || b[0] > x1) continue
         paintPath(ctx, st, strokePath(st))
       }
+      return c
+    }
+
+    /** Visible tile range for tiles rendered at zoom z, shown at the current zoom. */
+    const tileRange = (z: number) => {
+      const ts = (TILE * s.zoom) / z
+      const ox = Math.round(s.offX * s.dpr)
+      const oy = Math.round((TOP - s.scrollY) * s.dpr)
+      const cols = Math.ceil((PAGE_W * z * s.dpr) / TILE)
+      const rows = Math.ceil((pages() * PAGE_H * z * s.dpr) / TILE)
+      return {
+        ts, ox, oy,
+        i0: Math.max(0, Math.floor(-ox / ts)),
+        i1: Math.min(cols - 1, Math.floor((s.committed.width - ox) / ts)),
+        j0: Math.max(0, Math.floor(-oy / ts)),
+        j1: Math.min(rows - 1, Math.floor((s.committed.height - oy) / ts)),
+      }
+    }
+
+    /** Composes the committed layer from tiles, rendering missing ones within `budget` ms. */
+    const compose = (budget = Infinity) => {
+      const start = performance.now()
+      if (pages() !== s.tilePages) {
+        s.tilePages = pages()
+        invalidate()
+      }
+      const ctx = s.committed.getContext('2d', { alpha: false })!
+      ctx.setTransform(1, 0, 0, 1, 0, 0)
+      ctx.fillStyle = s.bg
+      ctx.fillRect(0, 0, s.committed.width, s.committed.height)
+      const r = tileRange(s.tileZoom)
+      const ready: [HTMLCanvasElement, number, number][] = []
+      let missing = false
+      for (let j = r.j0; j <= r.j1; j++) {
+        for (let i = r.i0; i <= r.i1; i++) {
+          const key = i + ',' + j
+          let t = s.tiles.get(key)
+          if (t) s.tiles.delete(key) // re-insert below: Map order doubles as LRU
+          else if (performance.now() - start < budget || !ready.length) t = renderTile(i, j)
+          if (t) {
+            s.tiles.set(key, t)
+            ready.push([t, i, j])
+          } else missing = true
+        }
+      }
+      if (missing && s.oldTiles.size) {
+        const o = tileRange(s.oldZoom)
+        for (const [key, t] of s.oldTiles) {
+          const [i, j] = key.split(',').map(Number)
+          ctx.drawImage(t, o.ox + i * o.ts, o.oy + j * o.ts, o.ts, o.ts)
+        }
+      } else if (missing) {
+        ctx.fillStyle = '#fff'
+        ctx.fillRect(r.ox, r.oy, PAGE_W * s.zoom * s.dpr, pages() * PAGE_H * s.zoom * s.dpr)
+      }
+      for (const [t, i, j] of ready) ctx.drawImage(t, r.ox + i * r.ts, r.oy + j * r.ts, r.ts, r.ts)
+      if (missing) requestFrame()
+      else if (budget === Infinity) freeTiles(s.oldTiles)
+      else if (budget !== Infinity) {
+        freeTiles(s.oldTiles)
+        // Spare time: render the rows just above and below the view, so scrolling rarely waits.
+        for (const j of [r.j1 + 1, r.j0 - 1]) {
+          for (let i = r.i0; i <= r.i1 && performance.now() - start < budget / 2; i++) {
+            const rows = Math.ceil((pages() * PAGE_H * s.tileZoom * s.dpr) / TILE)
+            if (j < 0 || j >= rows || s.tiles.has(i + ',' + j)) continue
+            s.tiles.set(i + ',' + j, renderTile(i, j))
+          }
+        }
+      }
+      while (s.tiles.size > MAX_TILES) {
+        const [key, t] = s.tiles.entries().next().value!
+        s.tiles.delete(key)
+        if (s.pool.length < 16) s.pool.push(t)
+      }
+    }
+
+    /** Re-renders everything (content changed). */
+    const renderCommitted = (b?: Box) => {
+      invalidate(b)
+      compose()
+    }
+
+    const frame = () => {
+      cancelAnimationFrame(s.raf)
+      s.raf = 0
+      compose(FRAME_BUDGET)
+      present()
+      placeEditor()
+    }
+    function requestFrame() {
+      if (!s.raf) s.raf = requestAnimationFrame(frame)
     }
 
     const present = () => {
@@ -276,6 +413,8 @@ export default function InkCanvas(props: Props) {
       canvas.style.width = r.width + 'px'
       canvas.style.height = r.height + 'px'
       clampScroll()
+      s.tileZoom = s.zoom
+      freeTiles(s.tiles)
       renderCommitted()
       present()
       placeEditor()
@@ -288,13 +427,6 @@ export default function InkCanvas(props: Props) {
       return [Math.round(x * 100) / 100, Math.round(y * 100) / 100, Math.max(0.05, e.pressure || 0.5)]
     }
 
-    const view = () => {
-      clampScroll()
-      renderCommitted()
-      present()
-      placeEditor()
-    }
-
     /** Moves the content by (dx, dy) screen px; false when it's already at the edge. */
     const panBy = (dx: number, dy: number) => {
       const before = [s.offX, s.scrollY]
@@ -302,9 +434,7 @@ export default function InkCanvas(props: Props) {
       s.scrollY -= dy
       clampScroll()
       if (s.offX === before[0] && s.scrollY === before[1]) return false
-      renderCommitted()
-      present()
-      placeEditor()
+      requestFrame()
       return true
     }
 
@@ -314,28 +444,42 @@ export default function InkCanvas(props: Props) {
       s.scale = s.zoom / s.fit
       s.offX = mx - px * s.zoom
       s.scrollY = TOP + py * s.zoom - my
-      view()
+      clampScroll()
+      requestFrame()
+      // While zooming, the existing tiles are scaled; re-render them sharp once it stops.
+      clearTimeout(s.settle)
+      s.settle = window.setTimeout(() => {
+        if (s.zoom === s.tileZoom) return
+        freeTiles(s.oldTiles)
+        ;[s.oldTiles, s.tiles] = [s.tiles, s.oldTiles]
+        s.oldZoom = s.tileZoom
+        s.tileZoom = s.zoom
+        requestFrame()
+      }, 150)
     }
 
     const stopFling = () => cancelAnimationFrame(s.fling)
     // Keep scrolling after a swipe, slowing down like native lists do.
-    const startFling = () => {
+    // Velocity comes from the finger's own event timestamps, so a busy main thread can't distort it.
+    const startFling = (upTime: number) => {
       const t = s.panTrail
-      const now = performance.now()
-      const first = t.find(([ts]) => now - ts < 100)
-      const last = t[t.length - 1]
       s.panTrail = []
-      if (!first || !last || first === last || now - last[0] > 60) return
+      const last = t[t.length - 1]
+      if (!last || upTime - last[0] > 80) return // finger rested before lifting
+      const first = t.find(([ts]) => last[0] - ts <= 100)!
+      if (first === last) return
       let vx = (last[1] - first[1]) / (last[0] - first[0])
       let vy = (last[2] - first[2]) / (last[0] - first[0])
-      let prev = now
+      if (Math.hypot(vx, vy) < 0.1) return
+      let prev = performance.now()
       const step = (ts: number) => {
-        const dt = Math.min(32, ts - prev)
+        const dt = Math.max(0, Math.min(32, ts - prev))
         prev = ts
         const decay = Math.exp(-dt / 325)
         vx *= decay
         vy *= decay
         if (Math.hypot(vx, vy) < 0.02 || !panBy(vx * dt, vy * dt)) return
+        frame()
         s.fling = requestAnimationFrame(step)
       }
       s.fling = requestAnimationFrame(step)
@@ -347,20 +491,21 @@ export default function InkCanvas(props: Props) {
       const from = s.lastErase ?? [x, y]
       // Sample along the eraser's path so fast swipes don't skip strokes.
       const steps = Math.max(1, Math.ceil(Math.hypot(x - from[0], y - from[1]) / Math.max(2, r / 2)))
-      let changed = false
+      let changed: Box | null = null
       for (let i = 1; i <= steps; i++) {
         const ex = from[0] + ((x - from[0]) * i) / steps
         const ey = from[1] + ((y - from[1]) * i) / steps
         for (const st of p.strokes) {
           if (st.id !== s.keep && !s.erasing.has(st.id) && hitStroke(st, ex, ey, r)) {
             s.erasing.add(st.id)
-            changed = true
+            const b = strokeBounds(st)
+            changed = changed ? [Math.min(changed[0], b[0]), Math.min(changed[1], b[1]), Math.max(changed[2], b[2]), Math.max(changed[3], b[3])] : b
           }
         }
       }
       s.lastErase = [x, y]
       if (changed) {
-        renderCommitted()
+        renderCommitted(changed)
         present()
       }
     }
@@ -587,8 +732,8 @@ export default function InkCanvas(props: Props) {
         const { clientX: x, clientY: y } = samples[samples.length - 1]
         panBy(x - s.panLast[0], y - s.panLast[1])
         s.panLast = [x, y]
-        s.panTrail.push([e.timeStamp, x, y])
-        if (s.panTrail.length > 20) s.panTrail.shift()
+        for (const ev of samples) s.panTrail.push([ev.timeStamp, ev.clientX, ev.clientY])
+        if (s.panTrail.length > 40) s.panTrail.splice(0, s.panTrail.length - 40)
         return
       }
       if (s.mode === 'erase') {
@@ -669,7 +814,7 @@ export default function InkCanvas(props: Props) {
       if (e.pointerId !== s.pointerId) return
       const fling = s.mode === 'pan'
       finish(false)
-      if (fling) startFling()
+      if (fling) startFling(e.timeStamp)
     }
     const onCancel = (e: PointerEvent) => {
       if (liftTouch(e)) return
@@ -719,13 +864,31 @@ export default function InkCanvas(props: Props) {
 
     // Exposed so the props effect below can re-render.
     rerender.current = () => {
+      const p = propsRef.current
       computeContent()
-      s.selIds = new Set(propsRef.current.selection)
+      // Tiles only need re-rendering where something changed.
+      let full = p.paper !== s.prevPaper || moving() || !!s.resize
+      let box: Box | null = null
+      const add = (b: Box) => (box = box ? [Math.min(box[0], b[0]), Math.min(box[1], b[1]), Math.max(box[2], b[2]), Math.max(box[3], b[3])] : b)
+      const strokes = new Set(p.strokes)
+      const items = new Set(p.items)
+      for (const st of strokes) if (!s.prevStrokes.has(st)) add(strokeBounds(st))
+      for (const st of s.prevStrokes) if (!strokes.has(st) || s.erasing.has(st.id)) add(strokeBounds(st))
+      for (const it of items) if (!s.prevItems.has(it) || it.id === s.prevEditing || it.id === p.editing) add(itemBounds(it))
+      for (const it of s.prevItems) if (!items.has(it)) add(itemBounds(it))
+      if (s.prevStrokes.size + s.prevItems.size === 0) full = true
+      s.prevStrokes = strokes
+      s.prevItems = items
+      s.prevPaper = p.paper
+      s.prevEditing = p.editing
+      s.selIds = new Set(p.selection)
       if (s.mode !== 'erase') s.erasing.clear()
       if (s.mode !== 'move') s.moveDelta = [0, 0]
       if (s.mode !== 'resize') s.resize = null
       clampScroll()
-      renderCommitted()
+      if (full) renderCommitted()
+      else if (box) renderCommitted(box)
+      else compose()
       present()
       placeEditor()
     }
@@ -737,6 +900,8 @@ export default function InkCanvas(props: Props) {
 
     return () => {
       clearTimeout(s.holdTimer)
+      clearTimeout(s.settle)
+      cancelAnimationFrame(s.raf)
       stopFling()
       ro.disconnect()
       dark.removeEventListener('change', layout)
