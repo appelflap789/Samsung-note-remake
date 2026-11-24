@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ArrowLeft, Eraser, Hand, Highlighter, PenLine, Redo2, SquareDashed, Star, Trash2, Undo2, X } from 'lucide-react'
-import InkCanvas from './InkCanvas'
+import { ArrowLeft, Eraser, ExternalLink, Hand, Highlighter, ImagePlus, PenLine, Redo2, SquareDashed, Star, Trash2, Type, Undo2, X } from 'lucide-react'
+import InkCanvas, { type CanvasApi } from './InkCanvas'
 import ToolMenu from './ToolMenu'
 import { HL_PALETTE } from '../palettes'
-import type { Folder, Note, Paper, PenType, Stroke, Tool } from '../types'
+import { uid } from '../ink'
+import { saveMedia } from '../items'
+import type { Content, Folder, Item, Note, Paper, PenType, Stroke, TextItem, Tool } from '../types'
 
-type Op =
+/** `boxes` = the item list before and after, for steps that change images or text. */
+type Op = (
   | { t: 'add'; stroke: Stroke }
   | { t: 'erase'; items: { stroke: Stroke; index: number }[] }
   | { t: 'replace'; before: Stroke[]; after: Stroke[] }
+) & { boxes?: [Item[], Item[]] }
 
 interface Settings {
   penType: PenType
@@ -43,15 +47,20 @@ const pushRecent = (list: string[], c: string) => [c, ...list.filter((x) => x !=
 
 interface Props {
   note: Note
-  initialStrokes: Stroke[]
+  initial: Content
   folders: Folder[]
   onBack: () => void
   onUpdate: (patch: Partial<Note>, touch?: boolean) => void
-  onStrokes: (strokes: Stroke[]) => void
+  onContent: (content: Content) => void
 }
 
-export default function Editor({ note, initialStrokes, folders, onBack, onUpdate, onStrokes }: Props) {
-  const [strokes, setStrokes] = useState(initialStrokes)
+export default function Editor({ note, initial, folders, onBack, onUpdate, onContent }: Props) {
+  const [strokes, setStrokes] = useState(initial.strokes)
+  const [items, setItems] = useState(initial.items)
+  const [editing, setEditing] = useState<string | null>(null)
+  const editStart = useRef<Item[] | null>(null) // items before typing started, for a single undo step
+  const canvasApi = useRef<CanvasApi | null>(null)
+  const imageInput = useRef<HTMLInputElement>(null)
   const [tool, setToolState] = useState<Tool>('pen')
   const [cfg, setCfg] = useState(loadSettings)
   const [menu, setMenu] = useState(false)
@@ -66,6 +75,8 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
 
   const strokesRef = useRef(strokes)
   strokesRef.current = strokes
+  const itemsRef = useRef(items)
+  itemsRef.current = items
   const toolRef = useRef(tool)
   toolRef.current = tool
   const lastDrawTool = useRef<'pen' | 'highlighter'>('pen') // whose colours the toolbar shows
@@ -80,13 +91,25 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
   }, [])
 
   const commit = useCallback(
-    (next: Stroke[]) => {
+    (next: Stroke[], nextItems = itemsRef.current) => {
       strokesRef.current = next
+      itemsRef.current = nextItems
       setStrokes(next)
-      onStrokes(next)
+      setItems(nextItems)
+      onContent({ strokes: next, items: nextItems })
       force((n) => n + 1)
     },
-    [onStrokes],
+    [onContent],
+  )
+
+  /** Change only images/text boxes, as one undo step. */
+  const commitItems = useCallback(
+    (next: Item[], before = itemsRef.current) => {
+      undo.current.push({ t: 'replace', before: [], after: [], boxes: [before, next] })
+      redo.current = []
+      commit(strokesRef.current, next)
+    },
+    [commit],
   )
 
   const push = (op: Op) => {
@@ -107,15 +130,20 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
       const set = new Set(ids)
       const items: { stroke: Stroke; index: number }[] = []
       strokesRef.current.forEach((stroke, index) => set.has(stroke.id) && items.push({ stroke, index }))
-      if (!items.length) return
-      push({ t: 'erase', items })
-      commit(strokesRef.current.filter((s) => !set.has(s.id)))
+      const boxes = itemsRef.current.filter((it) => !set.has(it.id))
+      const boxesChanged = boxes.length !== itemsRef.current.length
+      if (!items.length && !boxesChanged) return
+      push({ t: 'erase', items, ...(boxesChanged ? { boxes: [itemsRef.current, boxes] } : {}) })
+      commit(
+        strokesRef.current.filter((s) => !set.has(s.id)),
+        boxes,
+      )
     },
     [commit],
   )
 
   const replaceStrokes = useCallback(
-    (ids: string[], fn: (s: Stroke) => Stroke) => {
+    (ids: string[], fn: (s: Stroke) => Stroke, fnItem?: (it: Item) => Item) => {
       const set = new Set(ids)
       const before: Stroke[] = []
       const after: Stroke[] = []
@@ -126,21 +154,83 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
         after.push(n)
         return n
       })
-      if (!after.length) return
-      push({ t: 'replace', before, after })
-      commit(next)
+      const boxes = fnItem && itemsRef.current.some((it) => set.has(it.id)) ? itemsRef.current.map((it) => (set.has(it.id) ? fnItem(it) : it)) : null
+      if (!after.length && !boxes) return
+      push({ t: 'replace', before, after, ...(boxes ? { boxes: [itemsRef.current, boxes] } : {}) })
+      commit(next, boxes ?? itemsRef.current)
     },
     [commit],
   )
 
   const onMoveSelection = useCallback(
     (dx: number, dy: number) =>
-      replaceStrokes(selection, (s) => ({ ...s, points: s.points.map(([x, y, p]) => [x + dx, y + dy, p]) })),
+      replaceStrokes(
+        selection,
+        (s) => ({ ...s, points: s.points.map(([x, y, p]) => [x + dx, y + dy, p]) }),
+        (it) => ({ ...it, x: it.x + dx, y: it.y + dy }),
+      ),
     [replaceStrokes, selection],
   )
 
+  const onResizeItem = useCallback(
+    (id: string, w: number, h: number) => commitItems(itemsRef.current.map((it) => (it.id === id ? { ...it, w, h } : it))),
+    [commitItems],
+  )
+
+  const startEditing = useCallback((id: string) => {
+    editStart.current = itemsRef.current
+    setSelection([])
+    setEditing(id)
+  }, [])
+
+  // Typing updates the item live; the whole edit becomes one undo step when it ends.
+  const onTextChange = useCallback(
+    (id: string, text: string) => commit(strokesRef.current, itemsRef.current.map((it) => (it.id === id ? { ...it, text } : it))),
+    [commit],
+  )
+
+  const endEditing = useCallback(() => {
+    const id = editing
+    setEditing(null)
+    const before = editStart.current
+    editStart.current = null
+    if (!id || !before) return
+    const it = itemsRef.current.find((x) => x.id === id) as TextItem | undefined
+    const next = it && !it.text.trim() ? itemsRef.current.filter((x) => x.id !== id) : itemsRef.current
+    const old = before.find((x) => x.id === id) as TextItem | undefined
+    if (next === itemsRef.current && old?.text === it?.text) return
+    commitItems(next, before)
+  }, [editing, commitItems])
+
+  const addText = () => {
+    const [cx, cy] = canvasApi.current?.center() ?? [500, 200]
+    const it: TextItem = { kind: 'text', id: uid(), x: cx - 300, y: cy, w: 600, h: 0, text: '', size: 32, color: cfg.pen.color }
+    editStart.current = itemsRef.current
+    commit(strokesRef.current, [...itemsRef.current, it])
+    setTool('lasso')
+    setEditing(it.id)
+  }
+
+  const addImage = async (file: File) => {
+    const ext = (file.type.split('/')[1] ?? 'png').replace('jpeg', 'jpg').replace('svg+xml', 'png')
+    if (!/^(jpg|png|webp|gif)$/.test(ext)) return alert('Please pick a JPG, PNG, WebP or GIF image.')
+    const bm = await createImageBitmap(file).catch(() => null)
+    if (!bm) return alert("This image couldn't be opened.")
+    const name = `${uid()}.${ext}`
+    await saveMedia(name, file)
+    const w = Math.min(600, bm.width)
+    const h = (bm.height * w) / bm.width
+    bm.close()
+    const [cx, cy] = canvasApi.current?.center() ?? [500, 200]
+    const it: Item = { kind: 'image', id: uid(), x: cx - w / 2, y: cy, w, h, media: name }
+    commitItems([...itemsRef.current, it])
+    setTool('lasso')
+    setSelection([it.id])
+  }
+
   const apply = useCallback(
     (op: Op, reverse: boolean) => {
+      setEditing(null)
       let next = strokesRef.current
       if (op.t === 'replace') {
         const map = new Map((reverse ? op.before : op.after).map((s) => [s.id, s]))
@@ -154,7 +244,7 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
         next = [...next]
         for (const { stroke, index } of op.items) next.splice(index, 0, stroke)
       }
-      commit(next)
+      commit(next, op.boxes ? op.boxes[reverse ? 0 : 1] : itemsRef.current)
     },
     [commit],
   )
@@ -177,7 +267,7 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return
+      if (['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName)) return
       if ((e.key === 'Delete' || e.key === 'Backspace') && selection.length) {
         onErase(selection)
         setSelection([])
@@ -254,12 +344,15 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
     )
 
   const quickColor = (c: string) => {
-    if (tool === 'lasso' && selection.length) return replaceStrokes(selection, (s) => ({ ...s, color: c }))
+    if (tool === 'lasso' && selection.length)
+      return replaceStrokes(selection, (s) => ({ ...s, color: c }), (it) => (it.kind === 'text' ? { ...it, color: c } : it))
     setColor(drawTool, c)
     if (tool !== drawTool) setTool(drawTool)
   }
 
   const sizeOf = tool === 'eraser' ? cfg.eraserSize : cur.size
+  const selectedText =
+    selection.length === 1 ? (items.find((it) => it.id === selection[0] && it.kind === 'text') as TextItem | undefined) : undefined
   const toolBtn = (t: Tool, icon: React.ReactNode, title: string) => (
     <button className={`tool ${tool === t ? 'on' : ''}`} onClick={(e) => pickTool(t, e.currentTarget)} title={title}>
       {icon}
@@ -313,6 +406,13 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
       <div className="ink-area">
         <InkCanvas
           strokes={strokes}
+          items={items}
+          editing={editing}
+          api={canvasApi}
+          onResizeItem={onResizeItem}
+          onEditItem={startEditing}
+          onTextChange={onTextChange}
+          onEditEnd={endEditing}
           paper={note.paper ?? 'plain'}
           tool={tool}
           pen={cfg.penType}
@@ -332,6 +432,16 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
         {selection.length > 0 && (
           <div className="selection-bar">
             <span>{selection.length} selected</span>
+            {selectedText && !selectedText.url && (
+              <button className="icon-btn small" title="Edit text" onClick={() => startEditing(selectedText.id)}>
+                <Type size={16} />
+              </button>
+            )}
+            {selectedText?.url && (
+              <button className="icon-btn small" title={selectedText.url} onClick={() => window.open(selectedText.url, '_blank', 'noopener')}>
+                <ExternalLink size={16} />
+              </button>
+            )}
             <button
               className="icon-btn small"
               title="Delete"
@@ -353,7 +463,24 @@ export default function Editor({ note, initialStrokes, folders, onBack, onUpdate
         {toolBtn('pen', <PenLine size={20} />, 'Pen (tap again for options)')}
         {toolBtn('highlighter', <Highlighter size={20} />, 'Highlighter (tap again for options)')}
         {toolBtn('eraser', <Eraser size={20} />, 'Eraser (tap again for options; S Pen button switches too)')}
-        {toolBtn('lasso', <SquareDashed size={20} />, 'Lasso select')}
+        {toolBtn('lasso', <SquareDashed size={20} />, 'Lasso select (tap an image or text box to select it)')}
+        <button className="tool" onClick={addText} title="Add text box">
+          <Type size={20} />
+        </button>
+        <button className="tool" onClick={() => imageInput.current?.click()} title="Add image">
+          <ImagePlus size={20} />
+        </button>
+        <input
+          ref={imageInput}
+          type="file"
+          accept="image/*"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            e.target.value = ''
+            if (f) addImage(f)
+          }}
+        />
         <span className="sep" />
         {recent.map((c) => (
           <button

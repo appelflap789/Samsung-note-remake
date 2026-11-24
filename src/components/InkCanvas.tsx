@@ -1,10 +1,19 @@
 import { useEffect, useRef } from 'react'
-import type { Paper, PenType, Point, Stroke, Tool } from '../types'
+import type { Item, Paper, PenType, Point, Stroke, TextItem, Tool } from '../types'
 import { PAGE_H, PAGE_W, drawPaper, hitStroke, outlineD, paintPath, strokeBounds, strokePath, uid } from '../ink'
+import { TEXT_PAD, drawItem, itemBounds, lineHeight } from '../items'
 import { recognizeShape, straightLine } from '../shapes'
+
+export interface CanvasApi {
+  /** Page point in the middle of what is on screen. */
+  center: () => [number, number]
+}
 
 interface Props {
   strokes: Stroke[]
+  items: Item[]
+  /** Text item being typed in. */
+  editing: string | null
   paper: Paper
   tool: Tool
   pen: PenType
@@ -18,6 +27,12 @@ interface Props {
   onErase: (ids: string[]) => void
   onSelect: (ids: string[]) => void
   onMoveSelection: (dx: number, dy: number) => void
+  onResizeItem: (id: string, w: number, h: number) => void
+  /** Tapped a selected text item. */
+  onEditItem: (id: string) => void
+  onTextChange: (id: string, text: string) => void
+  onEditEnd: () => void
+  api: React.MutableRefObject<CanvasApi | null>
   /** S Pen side button clicked while not writing (Android only reports it as a click). */
   onPenButton: () => void
   /** A draw/erase gesture finished (pen lifted). */
@@ -27,7 +42,8 @@ interface Props {
 const TOP = 24 // screen px gap above the first page
 const HOLD_MS = 600 // keep the pen still this long to snap the stroke into a shape
 
-type Mode = 'none' | 'draw' | 'erase' | 'pan' | 'lasso' | 'move'
+type Mode = 'none' | 'draw' | 'erase' | 'pan' | 'lasso' | 'move' | 'resize'
+type Box = [number, number, number, number]
 
 function inPolygon(x: number, y: number, poly: number[][]) {
   let inside = false
@@ -38,11 +54,10 @@ function inPolygon(x: number, y: number, poly: number[][]) {
   return inside
 }
 
-function unionBounds(strokes: Stroke[]): [number, number, number, number] | null {
-  if (!strokes.length) return null
-  const b: [number, number, number, number] = [Infinity, Infinity, -Infinity, -Infinity]
-  for (const st of strokes) {
-    const [x0, y0, x1, y1] = strokeBounds(st)
+function unionBounds(strokes: Stroke[], items: Item[]): Box | null {
+  if (!strokes.length && !items.length) return null
+  const b: Box = [Infinity, Infinity, -Infinity, -Infinity]
+  for (const [x0, y0, x1, y1] of [...strokes.map(strokeBounds), ...items.map(itemBounds)]) {
     b[0] = Math.min(b[0], x0)
     b[1] = Math.min(b[1], y0)
     b[2] = Math.max(b[2], x1)
@@ -64,6 +79,7 @@ export default function InkCanvas(props: Props) {
   const propsRef = useRef(props)
   propsRef.current = props
   const rerender = useRef<() => void>(() => {})
+  const editorRef = useRef<HTMLTextAreaElement>(null)
 
   const s = useRef({
     ctx: null as CanvasRenderingContext2D | null,
@@ -88,6 +104,9 @@ export default function InkCanvas(props: Props) {
     lasso: [] as [number, number][],
     moveFrom: [0, 0] as [number, number],
     moveDelta: [0, 0] as [number, number], // kept after release until the moved strokes arrive via props
+    selIds: new Set<string>(), // selection; set right away on tap-select, before the props catch up
+    tapItem: null as string | null, // pressed an already selected text item: a tap (no drag) edits it
+    resize: null as { id: string; w: number; h: number } | null,
     lastMenu: -1e9,
     panLastY: 0,
     contentBottom: 0,
@@ -105,11 +124,21 @@ export default function InkCanvas(props: Props) {
     const pageTransform = (ctx: CanvasRenderingContext2D) =>
       ctx.setTransform(s.dpr * s.zoom, 0, 0, s.dpr * s.zoom, s.dpr * s.offX, s.dpr * (TOP - s.scrollY))
 
-    const selected = () => {
-      const ids = new Set(propsRef.current.selection)
-      return propsRef.current.strokes.filter((st) => ids.has(st.id))
-    }
+    const selected = () => propsRef.current.strokes.filter((st) => s.selIds.has(st.id))
+    const selectedItems = () => propsRef.current.items.filter((it) => s.selIds.has(it.id))
     const moving = () => s.moveDelta[0] !== 0 || s.moveDelta[1] !== 0
+    const redraw = () => {
+      renderCommitted()
+      present()
+    }
+    const resized = (it: Item): Item => (s.resize?.id === it.id ? { ...it, w: s.resize.w, h: s.resize.h } : it)
+    /** Resize handle: bottom-right corner when exactly one item (and nothing else) is selected. */
+    const handleItem = () => {
+      const its = selectedItems()
+      return its.length === 1 && !selected().length ? its[0] : null
+    }
+    const HANDLE = 14
+    const handleAt = (b: Box): [number, number] => [b[2] + 8, b[3] + 8]
 
     const renderCommitted = () => {
       const ctx = s.committed.getContext('2d', { alpha: false })!
@@ -131,8 +160,14 @@ export default function InkCanvas(props: Props) {
         ctx.lineTo(PAGE_W, i * PAGE_H)
         ctx.stroke()
       }
-      // Strokes being dragged are drawn by present() at their offset instead.
-      const skip = moving() ? new Set(propsRef.current.selection) : null
+      // Strokes and items being dragged are drawn by present() at their offset instead.
+      const skip = moving() ? s.selIds : null
+      for (const it of propsRef.current.items) {
+        if (skip?.has(it.id) || it.id === s.resize?.id || it.id === propsRef.current.editing) continue
+        const b = itemBounds(it)
+        if (b[3] < top || b[1] > bottom) continue
+        drawItem(ctx, it, redraw)
+      }
       for (const st of propsRef.current.strokes) {
         if (s.erasing.has(st.id) || skip?.has(st.id)) continue
         const b = strokeBounds(st)
@@ -151,20 +186,32 @@ export default function InkCanvas(props: Props) {
         paintPath(ctx, s.live, new Path2D(outlineD(pts, s.live, false)))
       }
       const sel = selected()
-      if (sel.length) {
+      const selItems = selectedItems().map(resized)
+      if (s.resize) for (const it of selItems) drawItem(ctx, it, redraw)
+      if (sel.length || selItems.length) {
         const [dx, dy] = s.moveDelta
         if (moving()) {
           ctx.translate(dx, dy)
+          for (const it of selItems) drawItem(ctx, it, redraw)
           for (const st of sel) paintPath(ctx, st, strokePath(st))
           ctx.translate(-dx, -dy)
         }
-        const b = unionBounds(sel)!
+        const b = unionBounds(sel, selItems)!
         const pad = 8
         ctx.strokeStyle = '#3d7cf2'
         ctx.lineWidth = 1.5 / s.zoom
         ctx.setLineDash([6 / s.zoom, 4 / s.zoom])
         ctx.strokeRect(b[0] - pad + dx, b[1] - pad + dy, b[2] - b[0] + pad * 2, b[3] - b[1] + pad * 2)
         ctx.setLineDash([])
+        if (handleItem()) {
+          const [hx, hy] = handleAt(b)
+          const r = HANDLE / 2 / s.zoom
+          ctx.fillStyle = '#fff'
+          ctx.beginPath()
+          ctx.arc(hx + dx, hy + dy, r, 0, Math.PI * 2)
+          ctx.fill()
+          ctx.stroke()
+        }
       }
       if (s.mode === 'lasso' && s.lasso.length > 1) {
         ctx.strokeStyle = '#3d7cf2'
@@ -180,7 +227,28 @@ export default function InkCanvas(props: Props) {
     const computeContent = () => {
       let m = 0
       for (const st of propsRef.current.strokes) m = Math.max(m, strokeBounds(st)[3])
+      for (const it of propsRef.current.items) m = Math.max(m, itemBounds(it)[3])
       s.contentBottom = m
+    }
+
+    // The text box being edited is a real <textarea> laid exactly over the item.
+    const placeEditor = () => {
+      const ta = editorRef.current
+      const it = propsRef.current.items.find((x) => x.id === propsRef.current.editing) as TextItem | undefined
+      if (!ta || !it) return
+      const z = s.zoom
+      Object.assign(ta.style, {
+        left: `${s.offX + it.x * z}px`,
+        top: `${TOP - s.scrollY + it.y * z}px`,
+        width: `${it.w * z}px`,
+        minHeight: `${it.h * z}px`,
+        padding: `${TEXT_PAD * z}px`,
+        font: `${it.size * z}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`,
+        lineHeight: `${lineHeight(it) * z}px`,
+        color: it.color,
+      })
+      ta.style.height = '0'
+      ta.style.height = `${ta.scrollHeight}px`
     }
 
     const layout = () => {
@@ -200,6 +268,7 @@ export default function InkCanvas(props: Props) {
       clampScroll()
       renderCommitted()
       present()
+      placeEditor()
     }
 
     const toPage = (e: PointerEvent): Point => {
@@ -216,6 +285,7 @@ export default function InkCanvas(props: Props) {
       if (s.scrollY !== before) {
         renderCommitted()
         present()
+        placeEditor()
       }
     }
 
@@ -313,9 +383,18 @@ export default function InkCanvas(props: Props) {
         const ids =
           cancel || poly.length < 3
             ? []
-            : p.strokes
-                .filter((st) => st.points.filter(([x, y]) => inPolygon(x, y, poly)).length >= st.points.length * 0.6)
-                .map((st) => st.id)
+            : [
+                ...p.items
+                  .filter((it) => {
+                    const [x0, y0, x1, y1] = itemBounds(it)
+                    return inPolygon((x0 + x1) / 2, (y0 + y1) / 2, poly)
+                  })
+                  .map((it) => it.id),
+                ...p.strokes
+                  .filter((st) => st.points.filter(([x, y]) => inPolygon(x, y, poly)).length >= st.points.length * 0.6)
+                  .map((st) => st.id),
+              ]
+        s.selIds = new Set(ids)
         p.onSelect(ids)
         present()
       } else if (s.mode === 'move') {
@@ -323,18 +402,34 @@ export default function InkCanvas(props: Props) {
           s.moveDelta = [0, 0]
           renderCommitted()
           present()
+          if (!cancel && s.tapItem) p.onEditItem(s.tapItem)
         } else p.onMoveSelection(s.moveDelta[0], s.moveDelta[1])
+      } else if (s.mode === 'resize') {
+        const rz = s.resize
+        if (!cancel && rz) p.onResizeItem(rz.id, rz.w, rz.h)
+        else {
+          s.resize = null
+          redraw()
+        }
       }
+      s.tapItem = null
       s.mode = 'none'
       s.pointerId = -1
       s.keep = null
       if (was === 'draw' || was === 'erase') p.onGestureEnd()
     }
 
+    const p0 = () => propsRef.current
     const onDown = (e: PointerEvent) => {
       const p = propsRef.current
       if (s.mode === 'pan' && e.pointerType === 'pen') finish(true) // pen wins over palm/finger
       if (s.mode !== 'none') return
+      if (p.editing && e.pointerType !== 'touch') {
+        // Tapping outside the text box being typed in just closes it.
+        e.preventDefault()
+        p.onEditEnd()
+        return
+      }
       e.preventDefault()
       ;(document.activeElement as HTMLElement | null)?.blur?.()
       s.rect = canvas.getBoundingClientRect()
@@ -354,13 +449,39 @@ export default function InkCanvas(props: Props) {
       if (e.pointerType === 'mouse' && e.button !== 0) return finish(true)
       const pt = toPage(e)
       if (p.tool === 'lasso') {
-        const b = unionBounds(selected())
-        if (b && pt[0] > b[0] - 12 && pt[0] < b[2] + 12 && pt[1] > b[1] - 12 && pt[1] < b[3] + 12) {
+        const b = unionBounds(selected(), selectedItems())
+        const one = handleItem()
+        if (b && one) {
+          const [hx, hy] = handleAt(b)
+          if (Math.hypot(pt[0] - hx, pt[1] - hy) < 24 / s.zoom) {
+            s.mode = 'resize'
+            s.moveFrom = [pt[0], pt[1]]
+            s.resize = { id: one.id, w: one.w, h: one.h }
+            redraw()
+            return
+          }
+        }
+        const startMove = () => {
           s.mode = 'move'
           s.moveFrom = [pt[0], pt[1]]
           s.moveDelta = [0, 0]
-          return
         }
+        if (b && pt[0] > b[0] - 12 && pt[0] < b[2] + 12 && pt[1] > b[1] - 12 && pt[1] < b[3] + 12) {
+          if (one?.kind === 'text' && !one.url) s.tapItem = one.id
+          return startMove()
+        }
+        // Press on an item: select it and allow dragging it straight away.
+        const hit = [...p.items].reverse().find((it) => {
+          const [x0, y0, x1, y1] = itemBounds(it)
+          return pt[0] >= x0 && pt[0] <= x1 && pt[1] >= y0 && pt[1] <= y1
+        })
+        if (hit) {
+          s.selIds = new Set([hit.id])
+          p.onSelect([hit.id])
+          redraw()
+          return startMove()
+        }
+        s.selIds = new Set()
         if (p.selection.length) p.onSelect([])
         s.mode = 'lasso'
         s.lasso = [[pt[0], pt[1]]]
@@ -403,8 +524,19 @@ export default function InkCanvas(props: Props) {
         present()
         return
       }
+      if (s.mode === 'resize') {
+        const [x] = toPage(samples[samples.length - 1])
+        const it = p0().items.find((i) => i.id === s.resize!.id)!
+        const w = Math.max(40, it.w + x - s.moveFrom[0])
+        // Images keep their proportions; text boxes only get wider or narrower.
+        s.resize = { id: it.id, w, h: it.kind === 'image' ? (it.h * w) / it.w : it.h }
+        redraw()
+        return
+      }
       if (s.mode === 'move') {
         const [x, y] = toPage(samples[samples.length - 1])
+        if (s.tapItem && Math.hypot(x - s.moveFrom[0], y - s.moveFrom[1]) < 6 / s.zoom) return // still a tap
+        s.tapItem = null
         const first = !moving()
         s.moveDelta = [x - s.moveFrom[0], y - s.moveFrom[1]]
         if (first) renderCommitted() // lift the selection off the committed layer
@@ -481,11 +613,17 @@ export default function InkCanvas(props: Props) {
     // Exposed so the props effect below can re-render.
     rerender.current = () => {
       computeContent()
+      s.selIds = new Set(propsRef.current.selection)
       if (s.mode !== 'erase') s.erasing.clear()
       if (s.mode !== 'move') s.moveDelta = [0, 0]
+      if (s.mode !== 'resize') s.resize = null
       clampScroll()
       renderCommitted()
       present()
+      placeEditor()
+    }
+    propsRef.current.api.current = {
+      center: () => [PAGE_W / 2, (s.scrollY + s.h / 3 - TOP) / s.zoom],
     }
     computeContent()
     layout()
@@ -505,11 +643,27 @@ export default function InkCanvas(props: Props) {
     }
   }, [s])
 
-  useEffect(() => rerender.current(), [props.strokes, props.paper, props.selection])
+  useEffect(() => rerender.current(), [props.strokes, props.items, props.paper, props.selection, props.editing])
 
+  const editingItem = props.items.find((it) => it.id === props.editing) as TextItem | undefined
   return (
     <div ref={wrapRef} className="ink-wrap">
       <canvas ref={canvasRef} className={`ink-canvas tool-${props.tool}`} />
+      {editingItem && (
+        <textarea
+          key={editingItem.id}
+          ref={editorRef}
+          className="text-editor"
+          autoFocus
+          defaultValue={editingItem.text}
+          onChange={(e) => {
+            props.onTextChange(editingItem.id, e.target.value)
+            e.target.style.height = '0'
+            e.target.style.height = `${e.target.scrollHeight}px`
+          }}
+          onKeyDown={(e) => e.key === 'Escape' && props.onEditEnd()}
+        />
+      )}
     </div>
   )
 }

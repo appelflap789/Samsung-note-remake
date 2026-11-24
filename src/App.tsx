@@ -6,7 +6,8 @@ import Editor from './components/Editor'
 import { useNotesDB } from './store'
 import { uid } from './ink'
 import { importSdocx } from './sdocx'
-import type { Stroke, View } from './types'
+import { saveMedia } from './items'
+import type { Content, View } from './types'
 
 type Sort = 'updated' | 'created' | 'title'
 
@@ -17,7 +18,7 @@ const fmt = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'sho
 export default function App() {
   const { db, status, left, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
-  const [opened, setOpened] = useState<{ id: string; strokes: Stroke[] } | null>(null)
+  const [opened, setOpened] = useState<{ id: string; content: Content } | null>(null)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>('updated')
   const [collapsed, setCollapsed] = useState(narrow.matches)
@@ -48,7 +49,7 @@ export default function App() {
 
   const openNote = async (id: string) => {
     try {
-      setOpened({ id, strokes: await loadStrokes(id) })
+      setOpened({ id, content: await loadStrokes(id) })
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
     }
@@ -64,6 +65,7 @@ export default function App() {
       await new Promise((r) => setTimeout(r)) // let the page repaint
       try {
         const r = await importSdocx(await file.arrayBuffer(), file.name)
+        for (const [name, blob] of r.media) await saveMedia(name, blob)
         const now = Date.now()
         await addNote(
           {
@@ -76,7 +78,7 @@ export default function App() {
             updatedAt: now,
             paper: 'plain',
           },
-          r.strokes,
+          { strokes: r.strokes, items: r.items },
         )
       } catch (e) {
         failed.push(`${file.name}: ${e instanceof Error ? e.message : e}`)
@@ -92,11 +94,11 @@ export default function App() {
       <Editor
         key={open.id}
         note={open}
-        initialStrokes={opened.strokes}
+        initial={opened.content}
         folders={db.folders}
         onBack={() => setOpened(null)}
         onUpdate={(patch, touch) => updateNote(open.id, patch, touch)}
-        onStrokes={(strokes) => updateStrokes(open.id, strokes)}
+        onContent={(content) => updateStrokes(open.id, content)}
       />
     )
   }

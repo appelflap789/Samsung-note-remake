@@ -9,7 +9,8 @@ const PORT = Number(process.env.PORT ?? 8080)
 const DATA = process.env.DATA_DIR ?? './data'
 const DIST = new URL('./dist/', import.meta.url).pathname
 const NOTES = join(DATA, 'notes') // <id>.json: note without strokes
-const STROKES = join(DATA, 'strokes') // <id>.json: the note's strokes array
+const STROKES = join(DATA, 'strokes') // <id>.json: the note's content, {strokes, items} (older files: strokes array)
+const MEDIA = join(DATA, 'media') // images, named <random id>.<ext>; never change once written
 const FOLDERS = join(DATA, 'folders.json')
 const MAX_BODY = 50 * 1024 * 1024
 
@@ -22,10 +23,15 @@ const TYPES = {
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
 }
 
 await mkdir(NOTES, { recursive: true })
 await mkdir(STROKES, { recursive: true })
+await mkdir(MEDIA, { recursive: true })
 
 /** Write via a temp file + rename so a crash never leaves a half-written note. */
 async function writeAtomic(file, data) {
@@ -51,7 +57,7 @@ for (const f of await readdir(NOTES)) {
   } else notes.set(note.id, note)
 }
 
-async function readBody(req) {
+async function readRaw(req) {
   const chunks = []
   let size = 0
   for await (const c of req) {
@@ -59,8 +65,9 @@ async function readBody(req) {
     if (size > MAX_BODY) throw Object.assign(new Error('Body too large'), { status: 413 })
     chunks.push(c)
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  return Buffer.concat(chunks)
 }
+const readBody = async (req) => JSON.parse((await readRaw(req)).toString('utf8'))
 
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
@@ -84,6 +91,21 @@ async function api(req, res, path) {
     version++
     return send(res, 204)
   }
+  const media = /^\/api\/media\/([\w-]{1,64}\.(?:jpe?g|png|webp|gif))$/.exec(path)
+  if (media) {
+    const file = join(MEDIA, media[1])
+    if (req.method === 'GET') {
+      const body = await readFile(file).catch(() => null)
+      if (!body) return send(res, 404, { error: 'Not found' })
+      res.writeHead(200, { 'content-type': TYPES[extname(file)], 'cache-control': 'public, max-age=31536000, immutable' })
+      return res.end(body)
+    }
+    if (req.method === 'PUT') {
+      await writeAtomic(file, await readRaw(req))
+      return send(res, 204)
+    }
+    return send(res, 405, { error: 'Method not allowed' })
+  }
   const m = /^\/api\/notes\/([\w-]{1,64})(\/strokes)?$/.exec(path)
   if (m) {
     const [, id, strokesPath] = m
@@ -99,9 +121,9 @@ async function api(req, res, path) {
       return
     }
     if (strokesPath && req.method === 'PUT') {
-      const strokes = await readBody(req)
-      if (!Array.isArray(strokes)) return send(res, 400, { error: 'Expected an array' })
-      await writeAtomic(strokesFile, JSON.stringify(strokes))
+      const content = await readBody(req)
+      if (!Array.isArray(content) && !Array.isArray(content?.strokes)) return send(res, 400, { error: 'Expected {strokes, items}' })
+      await writeAtomic(strokesFile, JSON.stringify(content))
       return send(res, 204)
     }
     if (strokesPath) return send(res, 405, { error: 'Method not allowed' })

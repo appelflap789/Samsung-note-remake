@@ -38,10 +38,48 @@ export interface Note {
   pages?: number
 }
 
-/** Strokes are stored and synced separately from the note list, and loaded only when a note is opened. */
+/** A picture placed on the page; the file itself is stored separately under `media`. */
+export interface ImageItem {
+  kind: 'image'
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  /** Media file name, e.g. "k3j2h1.jpg". */
+  media: string
+}
+
+/** Typed text (or a link card when `url` is set). Grows downwards to fit its text. */
+export interface TextItem {
+  kind: 'text'
+  id: string
+  x: number
+  y: number
+  w: number
+  /** Minimum height. */
+  h: number
+  text: string
+  /** Font size in page units. */
+  size: number
+  color: string
+  /** Line height as a multiple of `size` (default 1.3). */
+  lh?: number
+  url?: string
+}
+
+export type Item = ImageItem | TextItem
+
+/** A note's content is stored and synced separately from the note list, and loaded only when it is opened. */
 export interface StrokesRecord {
   sv?: string
   strokes: Stroke[]
+  items?: Item[]
+}
+
+export interface Content {
+  strokes: Stroke[]
+  items: Item[]
 }
 
 export interface Folder {

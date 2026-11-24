@@ -1,5 +1,6 @@
 import { getStroke, type StrokeOptions } from 'perfect-freehand'
-import type { Paper, PenType, Point, Stroke } from './types'
+import type { Item, Paper, PenType, Point, Stroke } from './types'
+import { drawItem, imageBitmap, itemBounds } from './items'
 
 export const PAGE_W = 1000
 export const PAGE_H = 1414
@@ -33,9 +34,10 @@ export function drawPaper(ctx: CanvasRenderingContext2D, paper: Paper, y0: numbe
   ctx.stroke()
 }
 
-export function pageCount(strokes: Stroke[]): number {
+export function pageCount(strokes: Stroke[], items: Item[] = []): number {
   let m = 0
   for (const s of strokes) m = Math.max(m, strokeBounds(s)[3] - s.size)
+  for (const it of items) m = Math.max(m, itemBounds(it)[3] - 1)
   return Math.max(1, Math.floor(m / PAGE_H) + 1)
 }
 
@@ -216,12 +218,15 @@ export const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().to
 const THUMB_W = 240
 
 /** Render the first page to a small image, so the note list never needs the strokes themselves. */
-export function renderThumb(strokes: Stroke[]): string {
+export async function renderThumb(strokes: Stroke[], items: Item[] = []): Promise<string> {
+  const first = items.filter((it) => itemBounds(it)[1] < PAGE_H)
+  await Promise.all(first.map((it) => it.kind === 'image' && imageBitmap(it.media)))
   const c = document.createElement('canvas')
   c.width = THUMB_W
   c.height = Math.round((THUMB_W * PAGE_H) / PAGE_W)
   const ctx = c.getContext('2d')!
   ctx.scale(THUMB_W / PAGE_W, THUMB_W / PAGE_W)
+  for (const it of first) drawItem(ctx, it, () => {})
   for (const s of strokes) {
     if (strokeBounds(s)[1] >= PAGE_H) continue
     ctx.globalAlpha = strokeOpacity(s)

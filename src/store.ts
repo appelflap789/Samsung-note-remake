@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { del, get, set } from 'idb-keyval'
-import type { DB, Folder, Note, Stroke, StrokesRecord } from './types'
+import type { Content, DB, Folder, Note, Stroke, StrokesRecord } from './types'
 import { pageCount, renderThumb, uid } from './ink'
+import { API, uploadMedia } from './items'
 
 const KEY = 'samsung-notes-db-v2'
 const OLD_KEY = 'samsung-notes-db-v1' // notes with strokes inline
 const PENDING_KEY = 'samsung-notes-pending-v1'
-const API = `${import.meta.env.BASE_URL}api`
 const PULL_EVERY = 60_000
 
 /**
@@ -28,6 +28,9 @@ const strokesKey = (id: string) => `samsung-notes-strokes:${id}`
 const live = new Map<string, StrokesRecord>()
 const readStrokes = async (id: string) => live.get(id) ?? (await get<StrokesRecord>(strokesKey(id)))
 const flushLive = () => Promise.all([...live].map(([id, rec]) => set(strokesKey(id), rec)))
+/** Server files from before items existed hold a bare strokes array. */
+const asContent = (x: Stroke[] | StrokesRecord | Content): Content =>
+  Array.isArray(x) ? { strokes: x, items: [] } : { strokes: x.strokes, items: x.items ?? [] }
 
 export function useNotesDB() {
   const [db, setDb] = useState<DB | null>(null)
@@ -108,6 +111,7 @@ export function useNotesDB() {
   }, [])
 
   async function push() {
+    await uploadMedia()
     const p = pending.current
     const ids = [...p.notes]
     for (const [i, id] of ids.entries()) {
@@ -118,7 +122,7 @@ export function useNotesDB() {
         // Strokes changed (or the server may not have them): upload them before the note that points at them.
         const rec = await readStrokes(id)
         if (rec && rec.sv === note.sv) {
-          const res = await fetch(`${API}/notes/${id}/strokes`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(rec.strokes) })
+          const res = await fetch(`${API}/notes/${id}/strokes`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(asContent(rec)) })
           if (!res.ok) throw new Error(`Saving strokes failed (${res.status})`)
         }
       }
@@ -244,41 +248,59 @@ export function useNotesDB() {
     return note.id
   }, [])
 
-  /** Add a finished note (e.g. imported); its strokes go straight to storage. */
-  const addNote = useCallback(async (note: Omit<Note, 'sv' | 'thumb' | 'pages'>, strokes: Stroke[]) => {
-    const full: Note = { ...note, sv: uid(), thumb: renderThumb(strokes), pages: pageCount(strokes) }
-    await set(strokesKey(full.id), { sv: full.sv, strokes } satisfies StrokesRecord)
+  /** Add a finished note (e.g. imported); its content goes straight to storage. */
+  const addNote = useCallback(async (note: Omit<Note, 'sv' | 'thumb' | 'pages'>, { strokes, items }: Content) => {
+    const full: Note = { ...note, sv: uid(), thumb: await renderThumb(strokes, items), pages: pageCount(strokes, items) }
+    await set(strokesKey(full.id), { sv: full.sv, strokes, items } satisfies StrokesRecord)
     setDb((d) => d && { ...d, notes: [full, ...d.notes] })
   }, [])
 
-  /** Strokes of one note, from this device or else downloaded from the server. */
-  const loadStrokes = useCallback(async (id: string): Promise<Stroke[]> => {
+  /** Content of one note, from this device or else downloaded from the server. */
+  const loadStrokes = useCallback(async (id: string): Promise<Content> => {
     const note = latest.current?.notes.find((n) => n.id === id)
     const rec = await readStrokes(id)
-    if (rec && (!note || rec.sv === note.sv || serverless.current)) return rec.strokes
-    let strokes: Stroke[]
+    if (rec && (!note || rec.sv === note.sv || serverless.current)) return asContent(rec)
+    let content: Content
     try {
       const res = await fetch(`${API}/notes/${id}/strokes`, { cache: 'no-store' })
-      if (res.status === 404 || !res.headers.get('content-type')?.includes('json')) return rec?.strokes ?? []
+      if (res.status === 404 || !res.headers.get('content-type')?.includes('json')) return rec ? asContent(rec) : { strokes: [], items: [] }
       if (!res.ok) throw new Error(`Loading note failed (${res.status})`)
-      strokes = await res.json()
+      content = asContent(await res.json())
     } catch (e) {
-      if (rec) return rec.strokes
+      if (rec) return asContent(rec)
       throw e instanceof TypeError ? new Error("This note isn't on this device yet. Connect to your home server to open it.") : e
     }
-    await set(strokesKey(id), { sv: note?.sv, strokes } satisfies StrokesRecord)
+    await set(strokesKey(id), { sv: note?.sv, ...content } satisfies StrokesRecord)
     if (note && !note.thumb) {
-      const thumb = renderThumb(strokes)
-      const pages = pageCount(strokes)
+      const thumb = await renderThumb(content.strokes, content.items)
+      const pages = pageCount(content.strokes, content.items)
       setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id ? { ...n, thumb, pages } : n)) })
     }
-    return strokes
+    return content
   }, [])
 
+  // Notes changed on the server (e.g. re-imported with their images) come without a thumbnail: make them one by one.
+  const filling = useRef(false)
+  useEffect(() => {
+    if (status !== 'synced' || filling.current) return
+    filling.current = true
+    ;(async () => {
+      for (const n of latest.current?.notes ?? []) {
+        if (n.thumb || n.trashed) continue
+        try {
+          await loadStrokes(n.id)
+        } catch {
+          break // offline: try again after the next sync
+        }
+      }
+      filling.current = false
+    })()
+  }, [status, loadStrokes])
+
   /** Called on every edit in the open note; storage and thumbnail are updated shortly after. */
-  const updateStrokes = useCallback((id: string, strokes: Stroke[]) => {
+  const updateStrokes = useCallback((id: string, { strokes, items }: Content) => {
     const sv = uid()
-    const rec: StrokesRecord = { sv, strokes }
+    const rec: StrokesRecord = { sv, strokes, items }
     live.set(id, rec)
     setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id ? { ...n, sv, updatedAt: Date.now() } : n)) })
     clearTimeout(timers.current.get(id))
@@ -286,8 +308,8 @@ export function useNotesDB() {
       id,
       setTimeout(async () => {
         timers.current.delete(id)
-        const thumb = renderThumb(strokes)
-        const pages = pageCount(strokes)
+        const thumb = await renderThumb(strokes, items)
+        const pages = pageCount(strokes, items)
         setDb((d) => d && { ...d, notes: d.notes.map((n) => (n.id === id && n.sv === sv ? { ...n, thumb, pages } : n)) })
         await set(strokesKey(id), rec)
         if (live.get(id) === rec) live.delete(id)
@@ -330,7 +352,7 @@ async function migrate(pending: { notes: Set<string> }): Promise<DB> {
   for (const { strokes = [], ...note } of old?.notes ?? []) {
     const sv = uid()
     await set(strokesKey(note.id), { sv, strokes } satisfies StrokesRecord)
-    db.notes.push({ ...note, sv, thumb: renderThumb(strokes), pages: pageCount(strokes) })
+    db.notes.push({ ...note, sv, thumb: await renderThumb(strokes), pages: pageCount(strokes) })
     pending.notes.add(note.id) // upload the new thumbnail (and strokes, if the server lacks them)
   }
   await set(KEY, db)

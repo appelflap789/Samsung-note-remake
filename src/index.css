@@ -139,6 +139,7 @@ input[type=range] { width: 110px; accent-color: var(--accent); }
 .ink-canvas { position: absolute; inset: 0; display: block; touch-action: none; user-select: none; -webkit-user-select: none; cursor: crosshair; }
 .ink-canvas.tool-eraser { cursor: cell; }
 .ink-canvas.tool-lasso { cursor: default; }
+.text-editor { position: absolute; box-sizing: border-box; resize: none; overflow: hidden; margin: 0; border: 1.5px dashed #3d7cf2; border-radius: 4px; background: rgba(255, 255, 255, 0.85); outline: none; white-space: pre-wrap; overflow-wrap: break-word; }
 .ink-area { flex: 1; position: relative; display: flex; min-height: 0; }
 
 .selection-bar {
