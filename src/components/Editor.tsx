@@ -26,17 +26,18 @@ export default function Editor({ note, folders, onBack, onUpdate }: Props) {
   const redo = useRef<Op[]>([])
   const [, force] = useState(0)
 
+  const strokesRef = useRef(strokes)
+  strokesRef.current = strokes
+
   const commit = useCallback(
     (next: Stroke[]) => {
+      strokesRef.current = next
       setStrokes(next)
       onUpdate({ strokes: next })
       force((n) => n + 1)
     },
     [onUpdate],
   )
-
-  const strokesRef = useRef(strokes)
-  strokesRef.current = strokes
 
   const onAdd = useCallback(
     (s: Stroke) => {

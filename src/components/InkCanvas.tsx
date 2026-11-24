@@ -49,6 +49,7 @@ export default function InkCanvas(props: Props) {
     predicted: [] as Point[],
     erasing: new Set<string>(),
     lastErase: null as [number, number] | null,
+    keep: null as string | null, // stroke committed by a mid-stroke button press; never erased by that same gesture
     panLastY: 0,
     contentBottom: 0,
   }).current
@@ -157,7 +158,7 @@ export default function InkCanvas(props: Props) {
         const ex = from[0] + ((x - from[0]) * i) / steps
         const ey = from[1] + ((y - from[1]) * i) / steps
         for (const st of p.strokes) {
-          if (!s.erasing.has(st.id) && hitStroke(st, ex, ey, r)) {
+          if (st.id !== s.keep && !s.erasing.has(st.id) && hitStroke(st, ex, ey, r)) {
             s.erasing.add(st.id)
             changed = true
           }
@@ -170,19 +171,36 @@ export default function InkCanvas(props: Props) {
       }
     }
 
+    const endStroke = (cancel: boolean) => {
+      const done = s.live!
+      s.live = null
+      s.predicted = []
+      if (!cancel) {
+        // Bake into the committed layer right away so there is no flicker before React re-renders.
+        pageTransform(s.committed.getContext('2d')!)
+        paintPath(s.committed.getContext('2d')!, done, strokePath(done))
+        propsRef.current.onAdd(done)
+      }
+      present()
+    }
+
+    // S Pen side button (barrel = 2) or eraser end (32) acts as the eraser while held, like on Galaxy devices.
+    const penEraser = (e: PointerEvent) => e.pointerType === 'pen' && (e.buttons & 34) !== 0
+
+    // Erase only while the nib touches the screen; a barrel press while hovering also starts a pointer session.
+    const eraseSample = (ev: PointerEvent) => {
+      if (ev.pointerType === 'pen' && ev.pressure === 0) {
+        s.lastErase = null
+        return
+      }
+      const [x, y] = toPage(ev)
+      eraseAt(x, y)
+    }
+
     const finish = (cancel: boolean) => {
       const p = propsRef.current
       if (s.mode === 'draw' && s.live) {
-        const done = s.live
-        s.live = null
-        s.predicted = []
-        if (!cancel) {
-          // Bake into the committed layer right away so there is no flicker before React re-renders.
-          pageTransform(s.committed.getContext('2d')!)
-          paintPath(s.committed.getContext('2d')!, done, strokePath(done))
-          p.onAdd(done)
-        }
-        present()
+        endStroke(cancel)
       } else if (s.mode === 'erase') {
         const ids = [...s.erasing]
         s.lastErase = null
@@ -194,6 +212,7 @@ export default function InkCanvas(props: Props) {
       }
       s.mode = 'none'
       s.pointerId = -1
+      s.keep = null
     }
 
     const onDown = (e: PointerEvent) => {
@@ -211,12 +230,9 @@ export default function InkCanvas(props: Props) {
         s.panLastY = e.clientY
         return
       }
-      // S Pen side button (barrel = 2) or eraser end (32) temporarily switches to eraser, like on Galaxy devices.
-      const penEraser = e.pointerType === 'pen' && (e.buttons & 2 || e.buttons & 32)
-      if (p.tool === 'eraser' || penEraser || (e.pointerType === 'mouse' && e.button === 2)) {
+      if (p.tool === 'eraser' || penEraser(e) || (e.pointerType === 'mouse' && e.button === 2)) {
         s.mode = 'erase'
-        const [x, y] = toPage(e)
-        eraseAt(x, y)
+        eraseSample(e)
         return
       }
       if (e.pointerType === 'mouse' && e.button !== 0) return finish(true)
@@ -243,14 +259,19 @@ export default function InkCanvas(props: Props) {
         return
       }
       if (s.mode === 'erase') {
-        for (const ev of samples) {
-          const [x, y] = toPage(ev)
-          eraseAt(x, y)
-        }
+        for (const ev of samples) eraseSample(ev)
         return
       }
       const pts = s.live!.points
       for (const ev of samples) {
+        if (penEraser(ev)) {
+          // Side button pressed mid-stroke: keep what was drawn so far and continue as eraser.
+          s.keep = s.live!.id
+          endStroke(false)
+          s.mode = 'erase'
+          for (const rest of samples.slice(samples.indexOf(ev))) eraseSample(rest)
+          return
+        }
         const pt = toPage(ev)
         const last = pts[pts.length - 1]
         if (last[0] === pt[0] && last[1] === pt[1]) {
@@ -293,7 +314,7 @@ export default function InkCanvas(props: Props) {
     // Exposed so the strokes effect below can re-render.
     rerender.current = () => {
       computeContent()
-      s.erasing.clear()
+      if (s.mode !== 'erase') s.erasing.clear()
       clampScroll()
       renderCommitted()
       present()
