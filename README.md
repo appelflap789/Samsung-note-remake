@@ -44,6 +44,7 @@ In Samsung Notes, share a note as a **Samsung Notes file** (`.sdocx`), then use 
 - `desynchronized` canvas → front-buffer rendering, skips the compositor queue.
 - `pointerrawupdate` + `getCoalescedEvents()` → every digitizer sample, not one per frame.
 - `getPredictedEvents()` → ink drawn slightly ahead of the nib to hide display lag.
+- Finished ink is cached in 512 px bitmap tiles: scrolling and pinching only move or scale bitmaps; tiles are re-rendered when their content changes or the zoom settles.
 
 Paper templates: plain, lined, dotted, grid. Follows the Windows light/dark theme (paper stays white).
 
