@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ArrowDownUp, RotateCcw, Search, SquarePen, Star, Trash2 } from 'lucide-react'
+import { ArrowDownUp, FileInput, RotateCcw, Search, SquarePen, Star, Trash2 } from 'lucide-react'
 import Sidebar from './components/Sidebar'
 import Thumbnail from './components/Thumbnail'
 import Editor from './components/Editor'
 import { useNotesDB } from './store'
-import { pageCount } from './ink'
-import type { View } from './types'
+import { pageCount, uid } from './ink'
+import { importSdocx } from './sdocx'
+import type { Note, View } from './types'
 
 type Sort = 'updated' | 'created' | 'title'
 
@@ -14,12 +15,13 @@ const narrow = matchMedia('(max-width: 900px)')
 const fmt = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
 
 export default function App() {
-  const { db, updateNote, createNote, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
+  const { db, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
   const [openId, setOpenId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
   const [sort, setSort] = useState<Sort>('updated')
   const [collapsed, setCollapsed] = useState(narrow.matches)
+  const [importing, setImporting] = useState(false)
 
   useEffect(() => {
     const onChange = () => setCollapsed(narrow.matches)
@@ -43,6 +45,35 @@ export default function App() {
   }, [db, view, query, sort])
 
   if (!db) return null
+
+  const importFiles = async (files: File[]) => {
+    if (!files.length) return
+    setImporting(true)
+    const imported: Note[] = []
+    const failed: string[] = []
+    for (const file of files) {
+      try {
+        const r = await importSdocx(await file.arrayBuffer(), file.name)
+        const now = Date.now()
+        imported.push({
+          id: uid(),
+          title: r.title,
+          folderId: view.kind === 'folder' ? view.id : null,
+          favorite: false,
+          trashed: false,
+          createdAt: file.lastModified || now,
+          updatedAt: now,
+          strokes: r.strokes,
+          paper: 'plain',
+        })
+      } catch (e) {
+        failed.push(`${file.name}: ${e instanceof Error ? e.message : e}`)
+      }
+    }
+    addNotes(imported)
+    setImporting(false)
+    if (failed.length) alert(`Imported ${imported.length} note(s). Could not import:\n${failed.join('\n')}`)
+  }
 
   const open = openId ? db.notes.find((n) => n.id === openId) : null
   if (open) {
@@ -113,6 +144,21 @@ export default function App() {
             <button className="text-btn danger" onClick={() => confirm('Permanently delete all notes in Trash?') && emptyTrash()}>
               Empty trash
             </button>
+          )}
+          {view.kind !== 'trash' && (
+            <label className="text-btn" title="Import handwriting from Samsung Notes (.sdocx)">
+              <FileInput size={14} /> {importing ? 'Importing…' : 'Import Samsung Notes'}
+              <input
+                type="file"
+                multiple
+                hidden
+                disabled={importing}
+                onChange={(e) => {
+                  importFiles([...(e.target.files ?? [])])
+                  e.target.value = ''
+                }}
+              />
+            </label>
           )}
           <button className="text-btn" onClick={() => setSort(nextSort[sort])}>
             <ArrowDownUp size={14} /> Sort by: {sortLabel}

@@ -47,6 +47,10 @@ export function useNotesDB() {
     return note.id
   }, [])
 
+  const addNotes = useCallback((notes: Note[]) => {
+    setDb((d) => d && { ...d, notes: [...notes, ...d.notes] })
+  }, [])
+
   const deleteNoteForever = useCallback((id: string) => {
     setDb((d) => d && { ...d, notes: d.notes.filter((n) => n.id !== id) })
   }, [])
@@ -70,5 +74,5 @@ export function useNotesDB() {
     )
   }, [])
 
-  return { db, updateNote, createNote, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
+  return { db, updateNote, createNote, addNotes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
 }

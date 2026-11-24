@@ -25,6 +25,9 @@ Open http://localhost:4173 in Edge → **⋯ → Apps → Install this site as a
 - Hand toggle on: fingers scroll, pen draws (palm-friendly). Off: fingers draw too.
 - Ctrl+Z / Ctrl+Y undo/redo. Mouse wheel scrolls; right-drag with a mouse erases.
 
+## Import from Samsung Notes
+In Samsung Notes, share a note as a **Samsung Notes file** (`.sdocx`), then use **Import Samsung Notes** in the note list (multiple files allowed). Handwriting comes in as editable strokes with its colour, thickness and pressure; each Samsung page starts on a new page. Typed text, images and PDFs are not imported. Format details from [bxff/samsung-notes-format](https://github.com/bxff/samsung-notes-format) and the [twangodev/sdocx](https://github.com/twangodev/sdocx) format notes.
+
 ## Why it feels smooth
 - `desynchronized` canvas → front-buffer rendering, skips the compositor queue.
 - `pointerrawupdate` + `getCoalescedEvents()` → every digitizer sample, not one per frame.
