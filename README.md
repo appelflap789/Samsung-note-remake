@@ -32,7 +32,7 @@ In Samsung Notes, share a note as a **Samsung Notes file** (`.sdocx`), then use 
 `server.mjs` serves the app and stores notes as JSON files (`data/notes/*.json`, `data/folders.json`). With it, every device syncs through the server; each device keeps an offline copy and uploads changes when it's back online (last change wins). Without it (GitHub Pages, `npm run dev`) notes stay on the device. The sidebar shows the sync status.
 
 - Deploy the current working copy: `./deploy.sh` (from PowerShell: `wsl ./deploy.sh`). It copies the code to `~/samsung-notes` on the server and rebuilds the Docker container; `~/samsung-notes/data` is never touched.
-- The container listens on `127.0.0.1:8787` only; `tailscale serve --bg --https=443 http://127.0.0.1:8787` makes it available at `https://<server>.<tailnet>.ts.net` on your tailnet.
+- Open `http://<server>:8787` (e.g. via Tailscale: `http://jacob228:8787`). Over plain HTTP the browser won't install it as an app or load it offline; for that, enable Tailscale Serve: `tailscale serve --bg --https=443 http://127.0.0.1:8787`.
 - Back up by copying `~/samsung-notes/data`.
 
 ## Why it feels smooth
