@@ -32,6 +32,7 @@ const flushLive = () => Promise.all([...live].map(([id, rec]) => set(strokesKey(
 export function useNotesDB() {
   const [db, setDb] = useState<DB | null>(null)
   const [status, setStatus] = useState<SyncStatus>('syncing')
+  const [left, setLeft] = useState(0) // notes still to upload
   const latest = useRef<DB | null>(null)
 
   // The note/folder objects as last confirmed by the server. Immutable updates mean
@@ -108,7 +109,9 @@ export function useNotesDB() {
 
   async function push() {
     const p = pending.current
-    for (const id of [...p.notes]) {
+    const ids = [...p.notes]
+    for (const [i, id] of ids.entries()) {
+      setLeft(ids.length - i)
       if (timers.current.has(id)) continue // still being written in; uploaded once the pen rests
       const note = latest.current?.notes.find((n) => n.id === id)
       if (note && synced.current.get(id)?.sv !== note.sv) {
@@ -131,6 +134,7 @@ export function useNotesDB() {
         else synced.current.delete(id)
       }
     }
+    setLeft(0)
     if (p.folders) {
       const folders = latest.current?.folders ?? []
       const res = await fetch(`${API}/folders`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(folders) })
@@ -316,7 +320,7 @@ export function useNotesDB() {
     )
   }, [])
 
-  return { db, status, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
+  return { db, status, left, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder }
 }
 
 /** Move notes saved by older versions (strokes inside each note) to per-note stroke records. */

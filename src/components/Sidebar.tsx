@@ -15,6 +15,8 @@ interface Props {
   db: DB
   view: View
   sync: SyncStatus
+  /** Notes still waiting to be uploaded. */
+  left: number
   collapsed: boolean
   onToggle: () => void
   onView: (v: View) => void
@@ -22,7 +24,7 @@ interface Props {
   onDeleteFolder: (id: string) => void
 }
 
-export default function Sidebar({ db, view, sync, collapsed, onToggle, onView, onCreateFolder, onDeleteFolder }: Props) {
+export default function Sidebar({ db, view, sync, left, collapsed, onToggle, onView, onCreateFolder, onDeleteFolder }: Props) {
   const [adding, setAdding] = useState(false)
   const [name, setName] = useState('')
   const live = db.notes.filter((n) => !n.trashed)
@@ -100,7 +102,7 @@ export default function Sidebar({ db, view, sync, collapsed, onToggle, onView, o
           const { Icon } = SYNC[sync]
           return <Icon size={14} />
         })()}
-        {!collapsed && <span>{SYNC[sync].label}</span>}
+        {!collapsed && <span>{sync === 'syncing' && left > 1 ? `Uploading… ${left} notes left` : SYNC[sync].label}</span>}
       </div>
     </aside>
   )

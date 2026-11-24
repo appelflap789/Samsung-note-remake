@@ -15,7 +15,7 @@ const narrow = matchMedia('(max-width: 900px)')
 const fmt = (t: number) => new Date(t).toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })
 
 export default function App() {
-  const { db, status, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
+  const { db, status, left, updateNote, createNote, addNote, loadStrokes, updateStrokes, deleteNoteForever, emptyTrash, createFolder, deleteFolder } = useNotesDB()
   const [view, setView] = useState<View>({ kind: 'all' })
   const [opened, setOpened] = useState<{ id: string; strokes: Stroke[] } | null>(null)
   const [query, setQuery] = useState('')
@@ -121,6 +121,7 @@ export default function App() {
         db={db}
         view={view}
         sync={status}
+        left={left}
         collapsed={collapsed}
         onToggle={() => setCollapsed((c) => !c)}
         onView={setView}
